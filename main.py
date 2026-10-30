@@ -437,6 +437,8 @@ async def main():
             print(f"\nAccount {x + 1} failed: {failReason}. Skipping this account.\n")
             failures.append(f"[{x + 1}/{executionCount}] {failReason}")
             await lib.saveTiming(username, "failed", time.perf_counter() - startTime, stages + [f"Failed: {failReason}"])
+            with open("./userfail.txt", "a", encoding="utf-8") as f:
+                f.write(f"{username}:{passw}\n")
             bar.close()
             try:
                 if 'chrome' in locals():

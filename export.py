@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 
 # A run where every account failed only leaves timings.csv behind
-files = [name for name in ("accounts.txt", "cookies.json", "timings.csv") if os.path.exists(name)]
+files = [name for name in ("accounts.txt", "cookies.json", "timings.csv", "userfail.txt") if os.path.exists(name)]
 if not files:
     sys.exit("No accounts.txt, cookies.json or timings.csv found. Please run main.py first.")
 
@@ -28,6 +28,11 @@ if os.path.exists("accounts.txt"):
     with open("accounts.txt", "r", encoding="utf-8") as file:
         userPass = re.findall(r"^Username: (.*?), Password: (.*?), Email: ", file.read(), re.MULTILINE)
 
+userFail = []
+if os.path.exists("userfail.txt"):
+    with open("userfail.txt", "r", encoding="utf-8") as file:
+        userFail = [line for line in file if line.strip()]
+
 timings = []
 if os.path.exists("timings.csv"):
     with open("timings.csv", "r", encoding="utf-8") as file:
@@ -44,6 +49,9 @@ with open(os.path.join(formatDir, f"cookies_{len(cookies)}.txt"), "w", encoding=
 
 with open(os.path.join(formatDir, f"userpass_{len(userPass)}.txt"), "w", encoding="utf-8") as file:
     file.write("".join(f"{username}:{password}\n" for username, password in userPass))
+
+with open(os.path.join(formatDir, f"userfail_{len(userFail)}.txt"), "w", encoding="utf-8") as file:
+    file.write("".join(userFail))
 
 # Move instead of copy so the next main.py run starts with fresh files
 for name in files:
