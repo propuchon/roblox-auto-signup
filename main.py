@@ -6,13 +6,14 @@ import re
 import pyperclip
 import random
 import secrets
-import locale
 import gc
-from datetime import datetime
+import time
+from datetime import date, timedelta
 from DrissionPage import Chromium, ChromiumOptions, errors
 from tqdm import TqdmExperimentalWarning
 from tqdm.rich import tqdm
 from lib.lib import Main, getResourcePath
+from config import ask
 
 
 warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
@@ -37,7 +38,7 @@ async def main():
             print(f"An error occurred while checking for Ungoogled Chromium: {e}")
             browserPath = None
         if browserPath is None:
-            browserPath = input(
+            browserPath = ask("BROWSER_PATH",
                 "\033[1m"
                 "\n(RECOMMENDED) Press enter in order to use the default browser path (If you have Chrome installed)"
                 "\033[0m"
@@ -58,7 +59,7 @@ async def main():
             else:
                 break
         else:
-            ungoogledChromiumUsage = input(
+            ungoogledChromiumUsage = ask("USE_UNGOOGLED_CHROMIUM",
                 "Ungoogled Chromium is detected in the lib folder, would you like to use it? [y/n] (Default: Yes): "
             )
             if ungoogledChromiumUsage.lower() in ["y", "n", ""]:
@@ -68,7 +69,7 @@ async def main():
                         co.set_browser_path(f"{ungoogledPath}/chrome.exe")
                     break
                 else:
-                    browserPath = input(
+                    browserPath = ask("BROWSER_PATH",
                         "\033[1m"
                         "\n(RECOMMENDED) Press enter in order to use the default browser path (If you have Chrome installed)"
                         "\033[0m"
@@ -97,7 +98,7 @@ async def main():
                 print("\nPlease enter a valid option.")
 
     while True:
-        fixedPassword = input(
+        fixedPassword = ask("PASSWORD",
             "\033[1m"
             "\n(RECOMMENDED) Press enter in order to use a random password for each account"
             "\033[0m"
@@ -112,7 +113,7 @@ async def main():
             break
 
     while True:
-        verification = input(
+        verification = ask("EMAIL_VERIFICATION",
             "\033[1m"
             "\n(RECOMMENDED) Press enter in order to enable email verification"
             "\033[0m"
@@ -124,7 +125,7 @@ async def main():
         else:
             print("\nPlease enter a valid option.")
 
-    nameFormat = input(
+    nameFormat = ask("NAME_PREFIX",
         "\033[1m"
         "\n(RECOMMENDED) Press enter in order to use randomized name prefix"
         "\033[0m"
@@ -135,7 +136,7 @@ async def main():
         scrambledUsername = None
     else:
         while True:
-            scrambledUsername = input("\nWould you like to use a scrambled username?\nIf no, the script will try to generate a structured username, this might increase generation time. [y/n] (Default: Yes): ")
+            scrambledUsername = ask("SCRAMBLED_USERNAME", "\nWould you like to use a scrambled username?\nIf no, the script will try to generate a structured username, this might increase generation time. [y/n] (Default: Yes): ")
             if scrambledUsername.lower() in ["y", "n", ""]:
                 if scrambledUsername.lower() == "y" or scrambledUsername == "":
                     scrambledUsername = True
@@ -146,7 +147,7 @@ async def main():
                 print("\nPlease enter a valid option.")
 
     while True:
-        customization = input(
+        customization = ask("CUSTOMIZATION",
             "\nWould you like to customize the account after the generation process with a randomizer? [y/n] (Default: Yes): "
         )
         if customization.lower() in ["y", "n", ""]:
@@ -154,21 +155,21 @@ async def main():
         else:
             print("\nPlease enter a valid option.")
 
-    followUser = input(
+    followUser = ask("FOLLOW_USERS",
         "\nWould you like to follow any additional accounts after generating this account?\n"
         "If yes, enter the usernames separated by commas (,).\n"
         "Leave blank if none.\n"
         "Usernames: "
     )
 
-    proxyUsage = input(
+    proxyUsage = ask("PROXIES",
         "\nWould you like to use proxies?\n"
         "If yes, please enter the proxy IP and port in the format of IP:PORT separated by commas (,). (Example: http://localhost:1080).\n"
         "Leave blank if none.\n"
         "Proxy: "
     )
 
-    captchaBypass = input(
+    captchaBypass = ask("NOPECHA_API_KEY",
         "\nWould you like to bypass captcha through NopeCHA? (Note that there's only up to 200 free solves per day)"
         "\nYou can get a free API key from https://nopecha.com/manage and paste it here."
         "\nIf yes, please enter the API key for the service."
@@ -187,7 +188,7 @@ async def main():
                 captchaBypass = ""
 
     while True:
-        incognitoUsage = input(
+        incognitoUsage = ask("INCOGNITO",
             "\nWould you like to use incognito mode? Note that if captcha bypass is chosen, it will not be using incognito mode automatically. [y/n] (Default: Yes): "
         )
         if incognitoUsage.lower() in ["y", "n", ""]:
@@ -198,7 +199,7 @@ async def main():
     accounts = []
 
     while True:
-        executionCount = input(
+        executionCount = ask("ACCOUNT_COUNT",
             "\nNumber of accounts to generate (Default: 1): "
         )
         try:
@@ -268,11 +269,16 @@ async def main():
                 print(result[1])
     proxyNumber = len(usableProxies)
 
+    failures = []
     for x in range(int(executionCount)):
         captchaPresence = True
         captchaRetries = 0
         maxCaptchaRetries = 5
+        startTime = time.perf_counter()
+        stages = []
+        failReason = None
         while captchaPresence and captchaRetries < maxCaptchaRetries:
+            failReason = None
             if proxyUsage != "" and usableProxies:
                 try:
                     selectedProxy = random.choice(usableProxies)
@@ -292,6 +298,13 @@ async def main():
                 else:
                     username = lib.usernameCreator(None, scrambled=False)
             bar = tqdm(total=100)
+            setDescription = bar.set_description
+
+            def logStage(desc, *args, **kwargs):
+                # Record when each progress stage is reached, saved to timings.csv
+                stages.append(f"{desc.split(' [')[0]}@{time.perf_counter() - startTime:.1f}s")
+                setDescription(desc, *args, **kwargs)
+            bar.set_description = logStage
             bar.set_description(f"Initial setup completed [{x + 1}/{executionCount}]")
             bar.update(10)
 
@@ -302,6 +315,8 @@ async def main():
             except Exception as e:
                 print(f"Failed to initialize browser: {e}")
                 bar.close()
+                failReason = f"Browser failed to start: {' '.join(str(e).split())}"
+                captchaRetries += 1
                 continue
 
             accountCookies = []
@@ -316,6 +331,9 @@ async def main():
                 except Exception as e:
                     print(f"Failed to generate email: {e}")
                     bar.close()
+                    chrome.quit()
+                    failReason = f"Email creation failed: {' '.join(str(e).split())}"
+                    captchaRetries += 1
                     continue
 
             try:
@@ -331,32 +349,18 @@ async def main():
                     page.ele('@class=btn-cta-lg cookie-btn btn-primary-md btn-min-width', timeout=3).click()
                 except errors.ElementNotFoundError:
                     pass
-                bdaymonthelement = page.ele("#MonthDropdown", timeout=10)
-
-                oldLocale = locale.getlocale(locale.LC_TIME)
-                try:
-                    locale.setlocale(locale.LC_TIME, 'C')
-                    currentMonth = datetime.now().strftime("%b")
-                finally:
-                    try:
-                        locale.setlocale(locale.LC_TIME, oldLocale)
-                    except Exception:
-                        pass
-                bdaymonthelement.select.by_value(currentMonth)
+                birthday = date(2000, 1, 1) + timedelta(days=random.randrange((date(2008, 1, 1) - date(2000, 1, 1)).days))
+                months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                page.ele("#MonthDropdown", timeout=10).select.by_value(months[birthday.month - 1])
                 bdaydayelement = page.ele("#DayDropdown", timeout=10)
-                currentDay = datetime.now().day
                 try:
-                    if currentDay <= 9:
-                        bdaydayelement.select.by_value(f"0{currentDay}")
-                    else:
-                        bdaydayelement.select.by_value(str(currentDay))
+                    bdaydayelement.select.by_value(f"{birthday.day:02d}")
                 except Exception as e:
                     try:
-                        bdaydayelement.select.by_value(str(currentDay))
+                        bdaydayelement.select.by_value(str(birthday.day))
                     except Exception as e2:
-                        print(f"Warning: Could not set day to {currentDay}, using default. Errors: {e}, {e2}")
-                currentYear = datetime.now().year - 19
-                page.ele("#YearDropdown", timeout=10).select.by_value(str(currentYear))
+                        print(f"Warning: Could not set day to {birthday.day}, using default. Errors: {e}, {e2}")
+                page.ele("#YearDropdown", timeout=10).select.by_value(str(birthday.year))
                 page.ele("#signup-username", timeout=10).input(username)
                 page.ele("#signup-password", timeout=10).input(passw)
                 await asyncio.sleep(2)
@@ -365,11 +369,14 @@ async def main():
                 except errors.ElementNotFoundError:
                     pass
                 await asyncio.sleep(1)
+                # Capture Roblox requests (signup, challenge) so a stuck signup can be diagnosed.
+                # No method filter here: DrissionPage keeps it for later listen.start() calls, which broke the avatar GET in lib.customization
+                page.listen.start("roblox.com")
                 page.ele("@@id=signup-button@@name=signupSubmit@@class=btn-primary-md signup-submit-button btn-full-width", timeout=10).click()
                 bar.set_description(f"Signup submitted [{x + 1}/{executionCount}]")
                 bar.update(20)
 
-                if page.ele(".text-left korea-compliance-description-text-margin-left korea-compliance-description-text-margin-right small text", timeout=5):
+                if page.ele(".text-left korea-compliance-description-text-margin-left korea-compliance-description-text-margin-right small text", timeout=2):
                     print("\nKorean compliance detected, accepting terms...\n")
                     page.ele("@@id=compliance-privacy-policy-0@@class=checkbox").click()
                     page.ele("@@id=compliance-privacy-policy-1@@class=checkbox").click()
@@ -377,37 +384,31 @@ async def main():
                     page.ele("@@id=compliance-privacy-policy-4@@class=checkbox").click()
                     page.ele("@@id=signup-agreements-button@@class=btn-primary-md signup-submit-button btn-full-width@@name=signupAgreementsSubmit").click()
 
-                try:
-                    captcha = page.get_frame('xpath://*[@id="arkose-iframe"]')
-                    if captcha:
+                # Stop waiting as soon as signup redirects home instead of always waiting the full timeout for a captcha frame
+                captchaPresence = False
+                for _ in range(20):
+                    if "/home" in page.url:
+                        break
+                    if page.ele('#arkose-iframe', timeout=0):
                         captchaPresence = True
-                        if proxyNumber >= 2 and captchaBypass != "":
-                            print(f"Captcha detected for account {x + 1}, retrying... (Attempt {captchaRetries + 1}/{maxCaptchaRetries})")
-                            bar.close()
-                            chrome.quit()
-                            captchaRetries += 1
-                            continue
-                    else:
-                        captchaPresence = False
-                except errors.ElementNotFoundError:
-                    captchaPresence = False
+                        break
+                    await asyncio.sleep(0.5)
+                # With NopeCHA loaded, leave the captcha for the extension to solve during the longer wait below
+                if captchaPresence and captchaBypass == "":
+                    print(f"Captcha detected for account {x + 1}, retrying... (Attempt {captchaRetries + 1}/{maxCaptchaRetries})")
+                    bar.close()
+                    chrome.quit()
+                    failReason = "Captcha detected"
+                    captchaRetries += 1
+                    continue
 
             except Exception as e:
                 print(f"\nAn error occurred\n{e}\n")
                 captchaPresence = False
+                failReason = f"Signup error: {' '.join(str(e).split())}"
 
-        if captchaRetries >= maxCaptchaRetries:
-            print(f"Max captcha retries reached for account {x + 1}. Skipping this account.")
-            try:
-                if 'chrome' in locals():
-                    chrome.quit()
-            except Exception as e:
-                print(f"Warning: Could not quit browser: {e}")
-                pass
-            continue
-
-        if not captchaPresence:
-            timeout = 10 if captchaBypass == "" else 300
+        if not failReason:
+            timeout = 10 if captchaBypass == "" else 120
 
             try:
                 if lang == "en":
@@ -420,154 +421,70 @@ async def main():
                         page.wait.url_change(f"https://www.roblox.com/{lang}/home", timeout=timeout)
                     except errors.TimeoutError:
                         pass
+            # The login cookie only exists if Roblox actually created the account
+            if not any(cookie["name"] == ".ROBLOSECURITY" for cookie in page.cookies()):
+                failReason = "Signup was not completed (no login cookie after signup)"
+                print("\nRoblox POST requests after signup:")
+                for packet in page.listen.wait(count=500, timeout=1, fit_count=False) or []:
+                    if packet.method != "POST":
+                        continue
+                    res = packet.response
+                    print(f"  {res.status if res else 'no response'} {packet.url.split('?')[0]}")
+                    if res and res.status >= 400:
+                        print(f"    {str(res.body)[:300]}")
+
+        if failReason:
+            print(f"\nAccount {x + 1} failed: {failReason}. Skipping this account.\n")
+            failures.append(f"[{x + 1}/{executionCount}] {failReason}")
+            await lib.saveTiming(username, "failed", time.perf_counter() - startTime, stages + [f"Failed: {failReason}"])
+            bar.close()
+            try:
+                if 'chrome' in locals():
+                    chrome.quit()
+            except Exception as e:
+                print(f"Warning: Could not quit browser: {e}")
+            continue
+
+        if not captchaPresence:
             bar.set_description(f"Signup process [{x + 1}/{executionCount}]")
             bar.update(20)
 
             if verification is True:
                 try:
-                    page.ele(".btn-primary-md btn-primary-md btn-min-width").click()
-                    if page.ele("@@class=phone-verification-nonpublic-text text-description font-caption-body"):
-                        print("Found phone verification element, trying alternative email verification.\n")
-                        page.get("https://www.roblox.com/my/account#!/info")
-                        page.ele("@@class=account-field-edit-action@@text()=Add Email").click()
-                        await asyncio.sleep(0.5)
-                        page.ele("@@id=emailAddress@@name=userInfo.emailAddress@@type=email@@class=form-control input-field@@placeholder=Enter email@@autocomplete=off").input(email)
-                        page.ele("@@class=modal-full-width-button btn-primary-md btn-min-width@@text()=Add Email").click()
-                        await asyncio.sleep(0.5)
-                        if page.ele("@@class=modal-body@@text()=An email has been sent for verification."):
-                            link = None
-                            messages = []
-                            emailCheckAttempts = 0
-                            maxEmailAttempts = 30
-                            while emailCheckAttempts < maxEmailAttempts:
-                                try:
-                                    messages = lib.fetchVerification(email, emailPassword, emailID)
-                                    if len(messages) > 0:
-                                        break
-                                    await asyncio.sleep(5)
-                                    emailCheckAttempts += 1
-                                except Exception as e:
-                                    print(f"Error checking email: {e}")
-                                    emailCheckAttempts += 1
-                                    await asyncio.sleep(5)
+                    # Roblox no longer shows a verify-email prompt after signup, so add the email from account settings
+                    page.get("https://www.roblox.com/my/account#!/info")
+                    page.ele("xpath://*[contains(text(),'Email')]/ancestor::div[.//button][1]//button[normalize-space()='Add']", timeout=15).click()
+                    page.ele("#emailAddress", timeout=10).input(email)
+                    page.ele("@@tag()=button@@text()=Add Email", timeout=10).click()
+                    if page.ele("text:An email has been sent for verification", timeout=15):
+                        link = None
+                        for _ in range(30):
+                            try:
+                                messages = lib.fetchVerification(email, emailPassword, emailID)
+                            except Exception as e:
+                                print(f"Error checking email: {e}")
+                                messages = []
+                            for msg in messages:
+                                body = getattr(msg, 'text', None) or (msg.html[0] if getattr(msg, 'html', None) else "")
+                                match = re.search(r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+', body)
+                                if match:
+                                    link = match.group(0)
+                                    break
+                            if link:
+                                break
+                            await asyncio.sleep(5)
 
-                            if emailCheckAttempts >= maxEmailAttempts:
-                                print("Email verification timeout - no email received within expected time")
-                                bar.update(10)
-                            elif messages and len(messages) > 0:
-                                msg = messages[0]
-                                body = getattr(msg, 'text', None)
-                                if not body and hasattr(msg, 'html') and msg.html and len(msg.html) > 0:
-                                    body = msg.html[0]
-                                if body:
-                                    match = re.search(r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+', body)
-                                    if match:
-                                        link = match.group(0)
-
-                                if link:
-                                    bar.set_description(
-                                        f"Verifying email address [{x + 1}/{executionCount}]"
-                                    )
-                                    bar.update(20)
-                                    page.get(link)
-                                else:
-                                    bar.set_description(f"Email verification link not found [{x + 1}/{executionCount}]")
-                                    bar.update(10)
+                        if link:
+                            bar.set_description(f"Verifying email address [{x + 1}/{executionCount}]")
+                            bar.update(20)
+                            page.get(link)
+                            await asyncio.sleep(3)
                         else:
-                            bar.set_description(f"Verification email not found [{x + 1}/{executionCount}]")
+                            print("Email verification timeout - no verification link received within expected time")
                             bar.update(10)
-                    elif page.ele(". form-control input-field verification-upsell-modal-input"):
-                        page.ele(". form-control input-field verification-upsell-modal-input").input(email)
-                        page.ele(".modal-button verification-upsell-btn btn-cta-md btn-min-width").click()
-                        if page.ele(".verification-upsell-text-body", timeout=60):
-                            link = None
-                            messages = []
-                            emailCheckAttempts = 0
-                            maxEmailAttempts = 30
-                            while emailCheckAttempts < maxEmailAttempts:
-                                try:
-                                    messages = lib.fetchVerification(email, emailPassword, emailID)
-                                    if len(messages) > 0:
-                                        break
-                                    await asyncio.sleep(5)
-                                    emailCheckAttempts += 1
-                                except Exception as e:
-                                    print(f"Error checking email: {e}")
-                                    emailCheckAttempts += 1
-                                    await asyncio.sleep(5)
-
-                            if emailCheckAttempts >= maxEmailAttempts:
-                                print("Email verification timeout - no email received within expected time")
-                                bar.update(10)
-                            elif messages and len(messages) > 0:
-                                msg = messages[0]
-                                body = getattr(msg, 'text', None)
-                                if not body and hasattr(msg, 'html') and msg.html and len(msg.html) > 0:
-                                    body = msg.html[0]
-                                if body:
-                                    match = re.search(r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+', body)
-                                    if match:
-                                        link = match.group(0)
-
-                                if link:
-                                    bar.set_description(
-                                        f"Verifying email address [{x + 1}/{executionCount}]"
-                                    )
-                                    bar.update(20)
-                                    page.get(link)
-                                    await asyncio.sleep(3)
-                                else:
-                                    bar.set_description(f"Email verification link not found [{x + 1}/{executionCount}]")
-                                    bar.update(10)
-                        else:
-                            bar.set_description(f"Verification email not found [{x + 1}/{executionCount}]")
-                            bar.update(10)
-                    elif page.ele(".form-control input-field verification-upsell-modal-input"):
-                        page.ele(".form-control input-field verification-upsell-modal-input").input(email)
-                        page.ele(".modal-button verification-upsell-btn btn-cta-md btn-min-width").click()
-                        if page.ele(".verification-upsell-text-body", timeout=60):
-                            link = None
-                            messages = []
-                            emailCheckAttempts = 0
-                            maxEmailAttempts = 30
-                            while emailCheckAttempts < maxEmailAttempts:
-                                try:
-                                    messages = lib.fetchVerification(email, emailPassword, emailID)
-                                    if len(messages) > 0:
-                                        break
-                                    await asyncio.sleep(5)
-                                    emailCheckAttempts += 1
-                                except Exception as e:
-                                    print(f"Error checking email: {e}")
-                                    emailCheckAttempts += 1
-                                    await asyncio.sleep(5)
-
-                            if emailCheckAttempts >= maxEmailAttempts:
-                                print("Email verification timeout - no email received within expected time")
-                                bar.update(10)
-                            elif messages and len(messages) > 0:
-                                msg = messages[0]
-                                body = getattr(msg, 'text', None)
-                                if not body and hasattr(msg, 'html') and msg.html and len(msg.html) > 0:
-                                    body = msg.html[0]
-                                if body:
-                                    match = re.search(r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+', body)
-                                    if match:
-                                        link = match.group(0)
-
-                                if link:
-                                    bar.set_description(
-                                        f"Verifying email address [{x + 1}/{executionCount}]"
-                                    )
-                                    bar.update(20)
-                                    page.get(link)
-                                else:
-                                    bar.set_description(f"Email verification link not found [{x + 1}/{executionCount}]")
-                                    bar.update(10)
-                        else:
-                            bar.set_description(f"Verification email not found [{x + 1}/{executionCount}]")
-                            bar.update(10)
-
+                    else:
+                        bar.set_description(f"Verification email not sent [{x + 1}/{executionCount}]")
+                        bar.update(10)
                 except Exception as e:
                     print(f"\nAn error occurred during email verification\n{e}\n")
                     print(f"\nFailed to find email verification element. You may need to verify the account manually. Skipping and continuing...\n{e}\n")
@@ -608,6 +525,7 @@ async def main():
                     currentAccount = {"username": username, "password": passw, "email": email, "emailPassword": emailPassword, "cookies": accountCookies}
                     accounts.append(currentAccount)
                     await lib.saveAccount(currentAccount)
+                    await lib.saveTiming(username, "success", time.perf_counter() - startTime, stages)
 
                     if 'follow_error' in locals() and follow_error is not None:
                         bar.set_description(f"Finished account generation with errors [{x + 1}/{executionCount}]")
@@ -654,6 +572,7 @@ async def main():
                 currentAccount = {"username": username, "password": passw, "email": email, "emailPassword": emailPassword, "cookies": accountCookies}
                 accounts.append(currentAccount)
                 await lib.saveAccount(currentAccount)
+                await lib.saveTiming(username, "success", time.perf_counter() - startTime, stages)
 
                 bar.set_description(f"Finished account generation [{x + 1}/{executionCount}]")
 
@@ -661,6 +580,10 @@ async def main():
                 if remaining > 0:
                     bar.update(remaining)
                 bar.close()
+
+    print(f"\nCreated {len(accounts)}/{executionCount} accounts, {len(failures)} failed.")
+    for failure in failures:
+        print(f"Failed {failure}")
 
     if not accounts:
         print("No accounts were successfully created.")
@@ -672,7 +595,7 @@ async def main():
         print(f"Username: {account['username']}, Password: {'*' * len(account['password'])}, Email: {account['email']}, Email Password: {'*' * len(account['emailPassword']) if account['emailPassword'] is not None else 'N/A'}")
     print("\033[0m" "\nCredentials saved to accounts.txt\nCookies are saved to cookies.json file\n\nHave fun playing Roblox!")
 
-    accountManagerFormat = input(
+    accountManagerFormat = ask("EXPORT_TO_CLIPBOARD",
         "\nWould you like to export the account manager format into your clipboard? [y/n] (Default: No): "
     ) or "n"
     if accountManagerFormat.lower() in ["y", "yes"]:

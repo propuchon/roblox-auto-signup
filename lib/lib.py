@@ -456,7 +456,7 @@ class Main():
                         raise Exception(f"Invalid JSON response: {json_error}")
                 else:
                     if attempt < maxRetries - 1:
-                        print(f"Failed to create email with address {address}. Retrying attempt {attempt + 2}/{maxRetries}...")
+                        print(f"Failed to create email with address {address} (HTTP {emailID.status_code}). Retrying attempt {attempt + 2}/{maxRetries}...")
                         await asyncio.sleep(5)
                     else:
                         raise Exception(f"Failed to create email after {maxRetries} attempts")
@@ -472,7 +472,7 @@ class Main():
             raise ValueError("Address, password, and emailID must be provided.")
         if not hasattr(self, 'mailtm'):
             self.mailtm = MailTm()
-        if not hasattr(self, 'account'):
+        if getattr(self, 'account', None) is None or self.account.address != address:
             self.account = Account(emailID, address, password)
         messages = self.account.get_messages()
         return messages
@@ -580,6 +580,13 @@ class Main():
                 json.dump(existingData, jsonFile, indent=4)
         except Exception as e:
             print(f"Error writing to cookies.json: {e}")
+
+    async def saveTiming(self, username, status, seconds, stages):
+        try:
+            with open("./timings.csv", "a", encoding="utf-8") as f:
+                f.write(f"{username},{status},{seconds:.1f},{'; '.join(stages)}\n")
+        except Exception as e:
+            print(f"Error writing to timings.csv: {e}")
 
 
 if __name__ == "__main__":

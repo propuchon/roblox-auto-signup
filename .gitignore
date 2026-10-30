@@ -22,3 +22,5 @@ lib/library.py
 config.txt
 config.txt.bak
 output/
+timings.csv
+.env
