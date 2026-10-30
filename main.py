@@ -5,6 +5,7 @@ import sys
 import re
 import pyperclip
 import random
+import secrets
 import locale
 import gc
 from datetime import datetime
@@ -96,17 +97,14 @@ async def main():
                 print("\nPlease enter a valid option.")
 
     while True:
-        passw = (
-            input(
-                "\033[1m"
-                "\n(RECOMMENDED) Press enter in order to use the default password"
-                "\033[0m"
-                "\nThe password will be used for the account and email.\nIf you prefer to use your own password, do make sure that your password is strong enough.\nThis script has a built in password complexity checker.\nPassword: "
-            )
-            or "Qing762.chy"
+        fixedPassword = input(
+            "\033[1m"
+            "\n(RECOMMENDED) Press enter in order to use a random password for each account"
+            "\033[0m"
+            "\nThe password will be used for the account and email.\nIf you prefer to use your own password for all accounts, do make sure that your password is strong enough.\nThis script has a built in password complexity checker.\nPassword: "
         )
-        if passw != "Qing762.chy":
-            result = await lib.checkPassword(lib.usernameCreator(), passw)
+        if fixedPassword:
+            result = await lib.checkPassword(lib.usernameCreator(), fixedPassword)
             print(result)
             if "Password is valid" in result:
                 break
@@ -285,6 +283,7 @@ async def main():
 
             if "--no-analytics" not in sys.argv:
                 lib.checkAnalytics(version)
+            passw = fixedPassword or secrets.token_urlsafe(12)
             if nameFormat:
                 username = lib.usernameCreator(nameFormat)
             else:

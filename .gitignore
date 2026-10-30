@@ -21,3 +21,4 @@ gui.py
 lib/library.py
 config.txt
 config.txt.bak
+output/
