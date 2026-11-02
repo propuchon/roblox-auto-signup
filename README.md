@@ -27,21 +27,12 @@ The process begins by utilising the [Mail.tm](https://mail.tm/) service to obtai
 - Friends adding functionality
 - Able to randomly customise the account avatar (Clothes, Body size, etc)
 - Error handling
-- Integration with [NopeCHA](https://nopecha.com/) to solve captcha automatically
-- Built in [Ungoogle Chromium (Windows)](https://github.com/ungoogled-software/ungoogled-chromium) installer
 - Compatible with [Roblox Account Manager](https://github.com/ic3w0lf22/Roblox-Account-Manager)
 - Structured username format
 - Update checker functionality
 - The script does the job by itself
 - No webdriver required
 - Fast execution time
-
-
-> [!NOTE]
-> Extension loading (NopeCHA) can only by used on Chrome version 136 and below. As such, Ungoogled Chromium with version 136.0.7103.113 (Windows) is installed as a workaround.  As such, you might see a significant increase in folder size due to the presence of the browser.
-
-> [!WARNING]
-> For Mac / Linux users, you can find Ungoogle Chromium for your OS [here](https://ungoogled-software.github.io/ungoogled-chromium-binaries/releases/). Be sure to install version that is v136 and below.
 
 
 ## Installation / Usage

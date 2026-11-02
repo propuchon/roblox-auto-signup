@@ -1,10 +1,13 @@
 import os
+from pathlib import Path
 
-SECRET_KEYS = {"PASSWORD", "NOPECHA_API_KEY"}
+SECRET_KEYS = {"PASSWORD"}
 
 
-def loadEnv(path=".env"):
+def loadEnv(path=None):
     # Minimal .env reader: KEY=VALUE lines, # comments; real environment variables take precedence
+    if path is None:
+        path = Path(__file__).resolve().parent / ".env"
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8") as file:

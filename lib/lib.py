@@ -1,17 +1,15 @@
 import random
-import platform
 import requests
 import sys
 import uuid
 import hmac
 import os
 import hashlib
-import shutil
 import re
 import asyncio
 import json
-from DrissionPage import errors, SessionPage
-from zipfile import ZipFile
+import tempfile
+from DrissionPage import errors
 from datetime import datetime
 from pymailtm import MailTm, Account
 
@@ -116,106 +114,6 @@ class UsernameGenerator:
 
 
 class Main():
-    def downloadUngoogledChromium(self):
-        system = platform.system()
-        page = SessionPage()
-        versions = []
-        if system == "Windows":
-            page.get("https://ungoogled-software.github.io/ungoogled-chromium-binaries/releases/windows/64bit/")
-            for x in page.eles("@tag()=li"):
-                versionText = x.ele("@tag()=a").text
-                versions.append(versionText)
-        else:
-            print(f"{system} OS is not supported for automated installation yet. Please make sure Ungoogled Chromium is installed in order to use NopeCHA.")
-            return
-        try:
-            versions = list(filter(lambda ver: ver and "." in ver and ver.split(".")[0].isdigit() and int(ver.split(".")[0]) <= 136, versions))
-        except (ValueError, IndexError):
-            versions = []
-        if not versions:
-            return "No compatible versions found."
-        if system == "Windows":
-            unGoogledChromium = f"./lib/ungoogled-chromium_{versions[0]}.1_windows_x64"
-            if os.path.exists(unGoogledChromium):
-                return
-        prompt = input("Would you like to install Ungoogled Chromium for NopeCHA to work? [y/n] (Default: Yes): ")
-        if prompt.lower() == "y" or prompt == "" or prompt == "yes":
-            if system == "Windows":
-                if not os.path.exists(f"{unGoogledChromium}.zip"):
-                    print(f"Downloading Ungoogled Chromium version {versions[0]} for Windows...")
-                    print("This may take a while, please be patient....\nPlease do not close the program/terminal.")
-                    try:
-                        url = f"https://github.com/ungoogled-software/ungoogled-chromium-windows/releases/download/{versions[0]}.1/ungoogled-chromium_{versions[0]}.1_windows_x64.zip"
-                        r = requests.get(url, stream=True)
-                        r.raise_for_status()
-                        try:
-                            with open(f"{unGoogledChromium}.zip", "wb") as file:
-                                for chunk in r.iter_content(chunk_size=1024):
-                                    if chunk:
-                                        file.write(chunk)
-                        finally:
-                            r.close()
-                        print("Download complete. Proceeding to extract the zip file...")
-                    except requests.exceptions.RequestException as e:
-                        return f"Download failed: {e}"
-                    except PermissionError as e:
-                        return f"Permission error: {e}. Please check file permissions or run with administrator privileges."
-                    except IOError as e:
-                        return f"File I/O error: {e}"
-                else:
-                    print("Zip file already exists. Proceeding to extract...")
-                try:
-                    tempExtractDir = f"{unGoogledChromium}_temp"
-
-                    with ZipFile(f"{unGoogledChromium}.zip", 'r') as browserObject:
-                        browserObject.extractall(tempExtractDir)
-
-                    extractedItems = os.listdir(tempExtractDir)
-                    if len(extractedItems) == 1 and os.path.isdir(os.path.join(tempExtractDir, extractedItems[0])):
-                        shutil.move(os.path.join(tempExtractDir, extractedItems[0]), unGoogledChromium)
-                        os.rmdir(tempExtractDir)
-                    else:
-                        os.makedirs(unGoogledChromium, exist_ok=True)
-                        for item in extractedItems:
-                            shutil.move(os.path.join(tempExtractDir, item), os.path.join(unGoogledChromium, item))
-                        os.rmdir(tempExtractDir)
-
-                    print("Extraction complete. Deleting zip file...")
-                    os.remove(f"{unGoogledChromium}.zip")
-                    return "Ungoogled Chromium has been downloaded successfully."
-                except Exception as e:
-                    try:
-                        os.remove(f"{unGoogledChromium}.zip")
-                        if 'tempExtractDir' in locals() and os.path.exists(tempExtractDir):
-                            shutil.rmtree(tempExtractDir)
-                    except Exception:
-                        pass
-                    return f"Extraction failed: {e}"
-        else:
-            return "Download cancelled by user."
-
-    def returnUngoogledChromiumPath(self):
-        system = platform.system()
-        page = SessionPage()
-        versions = []
-        if system == "Windows":
-            page.get("https://ungoogled-software.github.io/ungoogled-chromium-binaries/releases/windows/64bit/")
-            for x in page.eles("@tag()=li"):
-                versionText = x.ele("@tag()=a").text
-                versions.append(versionText)
-            try:
-                versions = list(filter(lambda ver: ver and "." in ver and ver.split(".")[0].isdigit() and int(ver.split(".")[0]) <= 136, versions))
-            except (ValueError, IndexError):
-                versions = []
-            if not versions:
-                print("No compatible versions found.")
-                return
-            if system == "Windows":
-                unGoogledChromium = f"./lib/ungoogled-chromium_{versions[0]}.1_windows_x64"
-                return unGoogledChromium
-        else:
-            return None
-
     def usernameCreator(self, nameFormat=None, scrambled=False):
         counter = 0
         maxAttempts = 100
@@ -390,7 +288,43 @@ class Main():
             ''')
             await asyncio.sleep(2)
 
-    def testProxy(self, proxy):
+    def proxyAuthExtension(self, username, password):
+        # Chrome ignores user:pass in --proxy-server, so answer the proxy's 407 challenge from an extension
+        path = tempfile.mkdtemp(prefix="proxy-auth-")
+        with open(os.path.join(path, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "manifest_version": 3,
+                "name": "Proxy Auth",
+                "version": "1.0",
+                "permissions": ["webRequest", "webRequestAuthProvider"],
+                "host_permissions": ["<all_urls>"],
+                "background": {"service_worker": "background.js"}
+            }, f)
+        with open(os.path.join(path, "background.js"), "w", encoding="utf-8") as f:
+            f.write(
+                "chrome.webRequest.onAuthRequired.addListener(\n"
+                f"  (details, callback) => callback(details.isProxy ? {{authCredentials: {{username: {json.dumps(username)}, password: {json.dumps(password)}}}}} : {{}}),\n"
+                "  {urls: ['<all_urls>']},\n"
+                "  ['asyncBlocking']\n"
+                ");\n"
+            )
+        return path
+
+    def fetchProxyList(self, url):
+        # Webshare download link: one ip:port:username:password per line
+        # ponytail: keeps the last login only, fine while every Webshare proxy shares the same one
+        response = requests.get(url, timeout=15)
+        proxies, auth = [], None
+        for line in response.text.splitlines():
+            parts = line.strip().split(":")
+            if len(parts) == 4 and parts[1].isdigit():
+                proxies.append(f"http://{parts[0]}:{parts[1]}")
+                auth = (parts[2], parts[3])
+        if not proxies:
+            raise Exception(response.text.strip()[:200] or f"status {response.status_code}, empty response")
+        return proxies, auth
+
+    def testProxy(self, proxy, auth=None):
         if not proxy or not proxy.strip():
             return False, "Empty proxy provided"
 
@@ -407,7 +341,9 @@ class Main():
             if any(char in proxy for char in ['&', '|', ';', '$', '`', '(', ')', '<', '>']):
                 return False, f"Proxy contains invalid characters: {proxy}"
 
-            response = requests.get("http://www.google.com", proxies={"http": proxy, "https": proxy}, timeout=10)
+            # Credentials only go into the request, never into the messages below
+            url = proxy.replace("://", f"://{auth}@", 1) if auth else proxy
+            response = requests.get("http://www.google.com", proxies={"http": url, "https": url}, timeout=10)
             if response.status_code == 200:
                 return True, f"Proxy {proxy} is working"
             else:
@@ -550,21 +486,12 @@ class Main():
     async def saveAccount(self, account):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
-            with open("./accounts.txt", "a", encoding="utf-8") as f:
-                f.write(
-                    f"Username: {account['username']}, Password: {account['password']}, Email: {account['email']}, Email Password: {account['emailPassword']} (Created at {timestamp})\n"
-                )
-        except Exception as e:
-            print(f"Error writing to accounts.txt: {e}")
-
-        try:
             with open("./cookies.json", "r", encoding="utf-8") as file:
                 existingData = json.load(file)
         except FileNotFoundError:
             existingData = []
-        except Exception as e:
-            print(f"Error reading cookies.json: {e}")
-            existingData = []
+        if not isinstance(existingData, list):
+            raise ValueError("cookies.json must contain an account list; existing data was preserved.")
 
         accountData = {
             "username": account["username"],
@@ -575,11 +502,25 @@ class Main():
         }
         existingData.append(accountData)
 
+        # Replace only after the complete new file is written. Read/write errors
+        # propagate so the caller cannot report an unsaved account as successful.
+        temporaryPath = None
         try:
-            with open("./cookies.json", "w", encoding="utf-8") as jsonFile:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=".",
+                                             prefix=".cookies-", suffix=".tmp", delete=False) as jsonFile:
+                temporaryPath = jsonFile.name
                 json.dump(existingData, jsonFile, indent=4)
-        except Exception as e:
-            print(f"Error writing to cookies.json: {e}")
+                jsonFile.flush()
+                os.fsync(jsonFile.fileno())
+            os.replace(temporaryPath, "./cookies.json")
+        finally:
+            if temporaryPath and os.path.exists(temporaryPath):
+                os.remove(temporaryPath)
+
+        with open("./accounts.txt", "a", encoding="utf-8") as f:
+            f.write(
+                f"Username: {account['username']}, Password: {account['password']}, Email: {account['email']}, Email Password: {account['emailPassword']} (Created at {timestamp})\n"
+            )
 
     async def saveTiming(self, username, status, seconds, stages):
         try:
