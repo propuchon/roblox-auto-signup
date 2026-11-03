@@ -1,81 +1,86 @@
-"""Subprocess fixture: run the real lifecycle/exporter with fake browser and network."""
-
+"""Exercise real signal/export handling with a fake HTTP client and no external I/O."""
 import asyncio
 from pathlib import Path
 import sys
 import time
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock, patch
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main
 
-
 mode = sys.argv[1]
 export_mode = sys.argv[2] if len(sys.argv) > 2 else "dated"
-settings = dict(browser_path="", proxy_list=[], incognito=False, account_count=3,
-                fixed_password="test_password", name_format="", scrambled=True,
-                verification=False, customization=False, follow_list=[])
-library = NS(checkUpdate=AsyncMock(), usernameCreator=Mock(side_effect=["test_1", "test_2", "test_3"]),
-             saveAccount=AsyncMock(), saveTiming=AsyncMock())
+engine = sys.argv[3] if len(sys.argv) > 3 else "http"
+settings = dict(proxies=[], account_count=3, fixed_password="test_password", name_format="",
+                scrambled=True, birthday="2000-01-01", user_agent="test-agent",
+                done_delay=(60, 60) if mode == "cooldown_interrupt" else (0, 0),
+                failed_delay=(60, 60) if mode == "failed_cooldown_interrupt" else (0, 0))
 
-
-class Page:
-    url = "https://www.roblox.com/CreateAccount"
-    challenge = False
-    set = NS(window=NS(max=lambda: None))
-
-    def eles(self, *args, **kwargs):
-        return [NS(states=NS(is_displayed=True))] if self.challenge else []
-
-    def cookies(self):
-        return [{"name": ".ROBLOSECURITY", "value": "test_cookie"}] if "/home" in self.url else []
-
-
-def browser(*args, **kwargs):
-    with open("opened.txt", "a") as stream:
-        stream.write("browser\n")
-    return NS(latest_tab=Page())
-
-
-def close(*args):
-    with open("closed.txt", "a") as stream:
-        stream.write("closed\n")
-
-
-async def signup(page, username, password, index, *args, **kwargs):
-    if index == 1:
-        if mode in {"captcha", "headless_captcha"}:
-            page.challenge = True
-            return
-        if mode == "failure":
-            raise RuntimeError("Simulated form error")
-        if mode not in {"post_interrupt", "success"}:
-            Path("ready").touch()
-            # A real signal must also interrupt synchronous library calls.
-            time.sleep(60)
-    page.url = "https://www.roblox.com/home"
-
-
-async def post_process(lib, page, config, username, *args):
-    if username == "test_2" and mode == "post_interrupt":
+async def save(account):
+    if account["username"] == "test_2" and mode == "post_interrupt":
         Path("ready").touch()
         await asyncio.sleep(60)
-    return True, page.cookies()
 
+library = NS(usernameCreator=Mock(side_effect=["test_1", "test_2", "test_3"]),
+             saveAccount=AsyncMock(side_effect=save))
+
+class Client:
+    def __init__(self, **kwargs):
+        self.index = 0
+        Path("opened.txt").write_text("client\n")
+    def begin_round(self, proxy):
+        self.index += 1
+    def load_form(self):
+        if self.index == 2 and mode == "captcha_form":
+            raise main.CaptchaDetected("CAPTCHA detected")
+    def submit(self, username, password, birthday):
+        if mode == "failed_cooldown_interrupt":
+            raise main.CaptchaDetected("CAPTCHA detected")
+        if self.index == 2:
+            if mode in {"captcha", "captcha_wait"}:
+                raise main.CaptchaDetected("CAPTCHA detected")
+            if mode == "failure":
+                raise RuntimeError("Simulated HTTP form error")
+            if mode not in {"post_interrupt", "success"}:
+                Path("ready").touch()
+                time.sleep(60)
+        return dict(user_id=self.index, cookies=[{"name": ".ROBLOSECURITY", "value": "test_cookie"}])
+    def bandwidth(self):
+        return dict(request_body_bytes=50, response_encoded_bytes=100, response_decoded_bytes=200,
+                    request_headers_estimate=20, response_headers_estimate=20, http_bytes_estimate=190,
+                    request_count=2, not_modified=0, requests=[])
+    def confirmed_result(self):
+        return None
+    def close(self):
+        Path("closed.txt").write_text("closed\n")
+    def finish_round(self):
+        with Path("rounds_closed.txt").open("a") as handle:
+            handle.write(f"{self.index}\n")
+
+original_captcha_wait = main.wait_before_captcha_close
+
+async def captcha_wait(*args, **kwargs):
+    if mode == "failed_cooldown_interrupt":
+        return None
+    if mode == "captcha_wait":
+        Path("ready").touch()
+    await original_captcha_wait(*args, **kwargs)
+
+original_cooldown = main.sleep_between_rounds
+
+async def cooldown(*args, **kwargs):
+    if mode in {"cooldown_interrupt", "failed_cooldown_interrupt"}:
+        Path("ready").touch()
+    await original_cooldown(*args, **kwargs)
 
 with patch.object(main, "Main", return_value=library), \
-        patch.object(main, "gather_config", AsyncMock(return_value=settings)), \
-        patch.object(main, "setup_browser", return_value=(Mock(), None)), \
-        patch.object(main, "Chromium", side_effect=browser), \
-        patch.object(main, "closeBrowser", side_effect=close), \
-        patch.object(main, "run_signup", side_effect=signup), \
-        patch.object(main, "post_process_account", side_effect=post_process), \
-        patch.object(main, "tqdm", side_effect=lambda **kwargs: Mock(n=0)), \
-        patch.object(main, "ask", return_value="n"), main.stop_signals():
+        patch.object(main, "wait_before_captcha_close", side_effect=captcha_wait), \
+        patch.object(main, "sleep_between_rounds", side_effect=cooldown), \
+        patch.object(main, "gather_config", return_value=settings), \
+        patch.object(main, "SignupClient", Client), \
+        patch("lib.browser_signup.BrowserSignupClient", Client), main.stop_signals():
     try:
-        code = asyncio.run(main.main(3, headless=mode == "headless_captcha",
-                                     export_mode=export_mode))
+        code = asyncio.run(main.main(3, export_mode=export_mode, mode=engine))
     except main.StopRequested as exc:
         code = 128 + exc.signum
     sys.exit(code)

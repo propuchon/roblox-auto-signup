@@ -1,237 +1,151 @@
-> [!WARNING]
-> The tool has been archived from 25 April 2026, meaning that it will no longer receive updates anymore and it might break at any time.
-
-> [!NOTE]  
-> Join the [Discord server](https://qing762.is-a.dev/discord) for issues. Thanks a lot!
-
-> [!WARNING]
-> Please be advised that usage of this tool is entirely at your own risk. I assume no responsibility for any adverse consequences arising from its use, and users are encouraged to exercise caution and their own judgment when utilising this tool.
-
 # Roblox Auto Signup
 
-A tool that auto-fetches a temporary email address and creates an account at https://roblox.com/.
+## 1. What is this repo?
 
-## How it works
+สคริปต์ Python สำหรับเปิดหน้าสมัคร Roblox กรอกฟอร์ม และบันทึกผลแต่ละบัญชี
+พร้อม cookies, logs และปริมาณ bandwidth โดยเลือกวิธีรันได้ 3 แบบ:
 
-The process begins by utilising the [Mail.tm](https://mail.tm/) service to obtain a temporary email address. Then it will create an [Roblox](https://roblox.com) account. The email address is then utilized for verification for the [Roblox](https://roblox.com) account. Subsequently, another request is made to [Mail.tm](https://mail.tm/) to retrieve the email confirmation link. Upon account activation, the user can log in to Roblox and enjoy the game with the generated account.
+| โหมด | การทำงาน |
+| --- | --- |
+| `terminal` | ใช้ Chromium แบบ headless ไม่แสดงหน้าต่าง แต่ยังโหลดเว็บและรัน JavaScript |
+| `browser` (ค่าเริ่มต้น) | ทำงานเหมือน Terminal แต่เปิดหน้าต่าง Chromium/Chrome ให้เห็น |
+| `http` | ส่ง request ด้วย Requests โดยตรง ไม่เปิด Browser และไม่รัน JavaScript |
 
+เมื่อพบ CAPTCHA ใน Terminal/Browser โปรแกรมจะสุ่มเวลารอตรวจ login cookie
+ตาม `CAPTCHA_BEFORE_CLOSE` หากพบ cookie จะบันทึก success; หากหมดเวลาจะบันทึก failed
+โปรแกรมไม่ได้แก้ CAPTCHA อัตโนมัติ ส่วน HTTP จะ failed ทันทีเมื่อพบ CAPTCHA
 
-## Features
+หลังจบแต่ละบัญชีจะ export ผล ปิด Browser แล้วพักตามช่วง success/failed
+ก่อนทำบัญชีถัดไป รอบสุดท้ายไม่พัก และ signup rate limit จะหยุดทั้ง run
 
-- Able to use any Chromium-based browser
-- Able to use non-authenticated proxies
-- Be able to prompt to change to your own password instead of using the default one
-- Password complexity checker for custom password
-- Automatically checks if the username generated is taken or not. If yes, a new one would be generated
-- Customizable username prefix
-- Friends adding functionality
-- Able to randomly customise the account avatar (Clothes, Body size, etc)
-- Error handling
-- Compatible with [Roblox Account Manager](https://github.com/ic3w0lf22/Roblox-Account-Manager)
-- Structured username format
-- Update checker functionality
-- The script does the job by itself
-- No webdriver required
-- Fast execution time
+ค่าเริ่มต้นบันทึกใน **`output/YYYY-MM-DD/`** ตามวันที่เริ่มรัน เวลาไทย
+รันซ้ำวันเดียวกันจะสะสมข้อมูลในโฟลเดอร์เดิม โดยไม่ลบข้อมูลเก่า:
 
+| ไฟล์หลัก | ข้อมูล |
+| --- | --- |
+| `userpass.txt`, `userfail.txt` | บัญชีที่สำเร็จ / ล้มเหลว |
+| `cookies.txt` | Cookies ของบัญชีที่ยืนยันแล้ว |
+| `results.json` | ผลรวมของแต่ละ attempt; `requested_count=0` หมายถึงมี run ที่ไม่จำกัดจำนวน |
+| `process.log` | Log รายละเอียด |
+| `bandwidth.jsonl` | ปริมาณข้อมูลและต้นทุนประมาณการต่อ attempt ไม่ใช่ยอดบิล proxy |
 
-## Installation / Usage
+## 2. Parameters
 
-### [>>> VIDEO GUIDE <<<](https://qing762.is-a.dev/roblox-guide)
+**ตั้งค่าใน `.env`** — โปรแกรมอ่านให้อัตโนมัติ ตัวแปรที่กำหนดหน้าคำสั่งมีผลเหนือ `.env`
+รวมถึงค่าว่าง ดูตัวอย่างค่าทั้งหมดใน [`.env.example`](.env.example)
 
-#### 1. Portable executable method:
-- Just download the executable from the [releases tab](https://github.com/qing762/roblox-auto-signup/releases) and run it to generate accounts.
-- If your antivirus has flagged for potential malware, that should be a false flag so feel free to safely ignore. If you dont trust it enough somehow, feel free to use [Step 2](https://github.com/qing762/roblox-auto-signup#2-python-file-method) and build it yourself instead.
-- The account details should be generated at the `accounts.txt` file under the same directory.
+| Parameter | ค่าเริ่มต้น | ความหมาย |
+| --- | --- | --- |
+| `ACCOUNT_COUNT` | `0` | จำนวน attempts เมื่อไม่ระบุจำนวนใน CLI; `0` = รันไม่จำกัด |
+| `CAPTCHA_BEFORE_CLOSE` | `7,15` | สุ่มเวลารอตรวจ cookie หลังพบ CAPTCHA หน่วยวินาที ใช้เฉพาะ Terminal/Browser |
+| `RANDOM_WHEN_DONE` | `30,45` | สุ่มเวลาพักหลัง success ก่อนบัญชีถัดไป |
+| `RANDOM_WHEN_FAILED` | `60,100` | สุ่มเวลาพักหลัง failed ก่อนบัญชีถัดไป |
+| `PROXIES` | ว่าง | ใส่ proxy โดยตรง คั่นหลายรายการด้วย comma |
+| `PROXY_FILE` | ว่าง | ไฟล์ proxy หนึ่งรายการต่อบรรทัด เช่น `proxies.txt` |
+| `PROXY_USERNAME`, `PROXY_PASSWORD` | ว่าง | ข้อมูลยืนยันตัวตนกลางสำหรับ proxy ที่ไม่ได้ใส่ credentials ไว้ในรายการ |
+| `PASSWORD` | ว่าง = สุ่ม | รหัสผ่านที่จะใช้กับทุกบัญชี |
+| `NAME_PREFIX` | ว่าง = สร้างชื่ออัตโนมัติ | คำนำหน้าชื่อ ใช้อักษรอังกฤษ ตัวเลข หรือ `_` |
+| `SCRAMBLED_USERNAME` | `y` | สร้างชื่อแบบออกเสียง; `n` ใช้คำจากไฟล์ใน `lib/` เมื่อไม่ได้ตั้ง prefix |
+| `BIRTHDAY` | ว่าง = สุ่ม | วันเกิดรูปแบบ `YYYY-MM-DD` ต้องเป็นวันในอดีต |
+| `BROWSER_PATH` | ค้นหาอัตโนมัติ | Path ของ Chromium/Chrome executable |
+| `INCOGNITO` | `n` | `y` เปิด incognito; proxy ที่ต้องใช้ auth extension จะปิด incognito แต่ยังใช้ profile ใหม่ |
+| `HTTP_USER_AGENT` | ค่าจากโค้ด | User-Agent สำหรับโหมด HTTP เท่านั้น |
 
-#### 2. Python file method:
- - First, ensure that Python is installed:
- ``` shell
- https://www.python.org/downloads/
- ```
- - Run the following command:
- ```shell
- git clone https://github.com/qing762/roblox-auto-signup/ && cd roblox-auto-signup && pip install -r requirements.txt && python main.py
- ```
+ช่วงเวลาระบุเป็น `ต่ำสุด,สูงสุด` เช่น `7,15` สุ่มใหม่แต่ละครั้ง รองรับทศนิยม
+และต้องเป็นตัวเลข finite ที่ `0 <= ต่ำสุด <= สูงสุด` ใช้ `15,15` เพื่อกำหนดเวลาคงที่
+หรือ `0,0` เพื่อไม่รอ สำหรับ CAPTCHA จะยังตรวจ cookie หนึ่งครั้ง
 
-And you're all set! Follow the instructions as you interact with the Python file.
+ชื่อที่ถูกต้องคือ **`PROXY_FILE`** หากตั้งทั้ง `PROXIES` และ `PROXY_FILE`
+โปรแกรมจะรวมรายการ ตัดรายการซ้ำ แล้วใช้วนตามลำดับบัญชี
 
-#### Run one attempt on macOS / Linux
+**Parameters ตอนรัน** — ใช้ได้กับทั้ง `run.sh`, `run-terminal.sh` และ `run-browser.sh`
+ยกเว้น `--mode` ให้ใช้กับ `run.sh` เพราะอีกสองสคริปต์เลือกโหมดไว้แล้ว
 
-If the project already has a `venv` or `.venv` with its dependencies installed:
+| Parameter | ค่าเริ่มต้น | ความหมาย |
+| --- | --- | --- |
+| `count` | `ACCOUNT_COUNT` หรือ `0` | `0` = รันไม่จำกัด; จำนวนบวก = จำนวน attempts รวม failed เช่น `./run.sh 5` |
+| `--mode` | `browser` | เลือก `terminal`, `browser` หรือ `http` |
+| `--export-mode` | `dated` | `dated` สะสมใน `output/YYYY-MM-DD/`; `append` สะสมใน `output/` |
+| `--quiet` | ไม่เปิด | ซ่อน log รายละเอียดบนหน้าจอ แต่ยังมี bar, warning/error และ log ในไฟล์ |
+| `--no-progress` | ไม่เปิด | ปิด loading bar ซึ่งปกติแสดงเมื่อรันใน interactive Terminal |
+| `--browser-path` | `BROWSER_PATH` | ระบุ Browser executable แทนค่าใน `.env` |
+| `--cost-per-gb` | `0` | ราคาต่อ GB สำหรับประมาณต้นทุน; `0` ไม่คำนวณ |
+| `--request-timeout` | `60` วินาที | เวลาสูงสุดต่อ HTTP request หรือ Browser operation |
+| `--connect-timeout` | `10` วินาที | เวลาเชื่อมต่อ สำหรับโหมด HTTP |
+| `--read-timeout` | `30` วินาที | เวลารอข้อมูลระหว่างอ่าน response สำหรับโหมด HTTP |
+| `--heartbeat` | `5` วินาที | ความถี่ log ระหว่างรอ ไม่ใช่เวลารอ CAPTCHA |
+| `--help` | — | แสดงวิธีใช้โดยไม่เริ่มสมัคร |
 
-```sh
-./run.sh 1
-```
+เมื่อไม่ระบุจำนวน ทุกสคริปต์จะอ่าน `ACCOUNT_COUNT` จาก `.env` (ค่าเริ่มต้น `0`)
+ค่า `0` หมายถึงรันไม่จำกัดจนกดหยุดหรือพบเงื่อนไขหยุด เช่น rate limit
+หน้าจอแสดงจำนวนเป็น `1/∞`, `2/∞` และพักตามช่วง success/failed ก่อนทุกรอบถัดไป
+จำนวนบวกคือจำนวน attempts ไม่ใช่จำนวนบัญชีที่รับประกันว่าจะสมัครสำเร็จ ค่าติดลบใช้ไม่ได้
 
-The launcher uses the project's Python environment and works from any working
-directory. Running `./run.sh` without arguments also makes one attempt. An explicit
-count overrides `ACCOUNT_COUNT` in `.env`.
+## 3. Run script
 
-For a fresh installation:
+**ติดตั้งครั้งแรก** บน macOS/Linux ต้องมี Python 3 และ Chromium/Chrome สำหรับ Terminal/Browser:
 
 ```sh
 python3 -m venv venv
 venv/bin/python -m pip install -r requirements.txt
-./run.sh 1
+chmod +x run.sh run-terminal.sh run-browser.sh
+[ -f .env ] || cp .env.example .env
 ```
 
-Configuration is read from `.env`; missing settings are prompted in the terminal.
-Set `BROWSER_PATH` to your Chrome/Chromium executable, or leave it empty to use
-automatic detection. For a minimal first run, set `EMAIL_VERIFICATION=n`,
-`CUSTOMIZATION=n`, and leave `FOLLOW_USERS` and `PROXIES` empty.
+สคริปต์เลือก Python จาก `venv` → `.venv` → `python3` ตามลำดับ โดยไม่ต้อง activate
 
-If a CAPTCHA is detected, the script closes its browser and stops the entire run.
-It submits once and does not dismiss or retry the challenge.
-Successful account details are saved to `accounts.txt` and `cookies.json` in the
-project directory. A failed attempt exits with status 1.
-
-#### Visible and headless browser modes
+**รันด้วยค่าเริ่มต้น** — เปิด Browser ใช้ proxy และจำนวนตาม `.env`:
 
 ```sh
-./run.sh 1 --no-headless  # visible browser (the default)
-./run.sh 1 --headless     # Chromium runs in the background without a window
+./run.sh
 ```
 
-The equivalent Python command is `venv/bin/python main.py 1 --headless`.
-Windowed mode types fields character by character. Headless mode fills each field
-in one browser-protocol input call, preserving input events, and uses a fixed
-1280×900 window size instead of maximizing a desktop window. Both modes use the
-same form and proxy configuration.
-
-In both modes, detecting a visible CAPTCHA marks the current attempt as failed,
-closes its browser, exports the run, and exits without starting another attempt.
-Unrecognized challenges or unfinished forms still fail after the normal
-180-second timeout.
-
-#### Automatic exports and stopping a run
-
-Choose an export mode independently of the browser mode:
+หาก `.env` ตั้ง `ACCOUNT_COUNT=0` จะรันไม่จำกัด กด `Ctrl+C` เพื่อหยุดและ export ผล
+ถ้าต้องการบังคับจำนวนไม่จำกัดโดยไม่สนค่าใน `.env`:
 
 ```sh
-./run.sh 1 --export-mode dated
-./run.sh 1 --export-mode append --headless
+./run.sh 0                  # Browser (ค่าเริ่มต้น)
+./run-terminal.sh 0         # Headless
 ```
 
-`dated` is the default. Each invocation creates its own
-`output/<timestamp>-<id>/` directory. It includes the traditional `generate/`
-folder (`accounts.txt`, `cookies.json`, `userfail.txt`, `timings.csv`) and `format/`
-folder (`cookies_<count>.txt`, `userpass_<count>.txt`, `userfail_<count>.txt`).
-It also keeps the detailed files below in the dated directory. Results are saved
-when an attempt starts, when its stage changes, as soon as login cookies are
-captured, and when the attempt finishes.
+**รัน 1 attempt โดยไม่ใช้ proxy** เลือกคำสั่งตามโหมดที่ต้องการ:
 
-| File | Contents |
-| --- | --- |
-| `results.json` | Full run status, counts, credentials, cookies, stages, and failure reasons |
-| `results.csv` | One row per attempted account, with status and reason |
-| `success.txt` | Successful attempts as `username:password` |
-| `failed.txt` | Failed attempts as `username:password` |
-| `interrupted.txt` | Attempts stopped before completion |
-| `in_progress.txt` | Attempts currently running |
-| `cookies.txt` | Login cookies captured during this run |
+```sh
+# Terminal: ไม่แสดงหน้าต่าง Browser
+PROXIES= PROXY_FILE= ./run-terminal.sh 1
 
-`append` uses only these three export files, with no new dated folder or numbered
-filenames:
+# Browser: แสดงหน้าต่าง
+PROXIES= PROXY_FILE= ./run-browser.sh 1
+
+# HTTP: ส่ง request โดยตรง
+PROXIES= PROXY_FILE= ./run.sh 1 --mode http
+```
+
+**ใช้ proxy จากไฟล์** ใส่หนึ่งรายการต่อบรรทัดใน `proxies.txt`:
 
 ```text
-output/cookies.txt
-output/userfail.txt
-output/userpass.txt
+username:password@proxy.example.com:8080
 ```
 
-Files are created only if missing. Existing bytes are preserved, and new lines
-are appended and flushed to disk. Running the command again continues writing to
-the same files. Stage updates and shutdown do not repeat a line already exported
-for that attempt. Separate attempts remain separate records, even if their values
-match. If a file's existing last line has no newline, one is appended before the
-new entry.
+ตัวอย่างรัน 5 attempts โดยใช้ไฟล์นี้ และแสดงเฉพาะ bar กับ warning/error:
 
-Captured login cookies go to `cookies.txt`; credentials for created accounts go
-to `userpass.txt` immediately. Failed attempts and interrupted attempts without a
-confirmed created account go to `userfail.txt`. If signup succeeded before optional
-processing was interrupted, its credentials stay in `userpass.txt`. This compact
-mode does not create the detailed JSON/CSV report; use `dated` for failure reasons,
-timings, and a separate interrupted status. The account-count argument still
-controls how many attempts run; choosing append does not enable an infinite loop.
-
-Neither mode needs a separate `export.py` command. Existing export files from
-earlier runs are not moved or deleted.
-
-Ctrl+C (`SIGINT`), `SIGTERM`, and terminal hangup (`SIGHUP`, where available) trigger
-export and browser cleanup. Completed results retain their statuses; an unfinished
-attempt becomes `interrupted` in dated mode. If signup completed before an interruption during
-optional processing, `account_created=true` and the captured cookies remain in
-`results.json` even though the attempt is marked `interrupted`.
-
-Force kill (`SIGKILL`, such as `kill -9`) cannot run shutdown code or close the
-browser. Previously written data remains available. In dated mode the last attempt may
-still say `in_progress` and the run may still say `running`. `results.json` is the
-canonical atomic snapshot; derived CSV/text files can lag if the process is killed
-between file updates. An in-progress attempt does not imply that signup succeeded
-or failed on the server. In append mode, an unfinished attempt cannot be added to
-`userfail.txt` after SIGKILL, and a kill during a write can leave a partial final line.
-
-#### Proxy lists with separate logins
-
-Put one proxy per line in `proxies.txt` (this file is ignored by Git):
-
-```text
-user1:password1@host1:8080
-user2:password2@host2:8080
+```sh
+PROXIES= PROXY_FILE=proxies.txt ./run-browser.sh 5 --quiet
 ```
 
-Then configure `.env`:
+**ตัวอย่างเพิ่มเติม** ใช้ proxy ตามที่ตั้งไว้ใน `.env`:
 
-```dotenv
-PROXIES=
-PROXY_FILE=proxies.txt
-PROXY_USERNAME=
-PROXY_PASSWORD=
+```sh
+# สะสมผลไว้ใน output/ โดยไม่แยกวัน
+./run-terminal.sh 1 --export-mode append
+
+# ระบุ Browser หากค้นหาอัตโนมัติไม่พบ (ตัวอย่าง Chromium บน macOS)
+./run-browser.sh 1 --browser-path /Applications/Chromium.app/Contents/MacOS/Chromium
+
+# ดู options ทั้งหมด
+./run.sh --help
 ```
 
-Alternatively, put the entries on one `PROXIES=` line separated by commas.
-Each entry accepts `[http:// or https://][username:password@]host:port`.
-Percent-encode reserved characters in inline usernames/passwords, such as
-`@` as `%40`, `,` as `%2C`, and `#` as `%23`.
-Entries without inline credentials use the shared `PROXY_USERNAME` and
-`PROXY_PASSWORD` if set. Exact duplicates are tested only once; entries with
-different credentials remain separate even when the host is the same.
-
-Each attempt uses the next working proxy in order, wrapping around if needed.
-Authenticated proxies use a separate browser authentication extension per attempt
-and disable incognito. The extension's temporary directory is removed afterward.
-These settings apply to browser traffic and the proxy connectivity check;
-other Python HTTP requests, including username validation and email, retain their
-existing connection settings.
-
-
-
-## Contributing
-
-Contributions are always welcome!
-
-To contribute, fork this repository and do anything you wish. After that, make a pull request.
-
-
-## Feedback / Issues
-
-If you have any feedback or issues running the code, please join the [Discord server](https://qing762.is-a.dev/discord)
-
-### FOR ROBLOX CORPORATION EMPLOYEES, IF YOU WISH TO REQUEST THE TAKING DOWN THIS PROJECT
-
-If the company wishes to discontinue or terminate this project, please do not hesitate to reach out to me. I can be reached at [Discord/qing762](https://discord.com/users/635765555277725696). Thank you for your attention to this matter.
-
-
-## License
-
-Licensed under the GNU General Public License v3.0. See [LICENSE](https://github.com/qing762/roblox-auto-signup/blob/main/LICENSE) for details.
-
-
----
-
-
-[![Star History Chart](https://api.star-history.com/svg?repos=qing762/roblox-auto-signup&type=Date&theme=dark)](https://www.star-history.com/#qing762/roblox-auto-signup&Date)
-
-
----
+กด **Ctrl+C** เพื่อหยุด โปรแกรมจะปิด Browser และ export ผลที่เก็บได้
+รวมถึงเมื่อส่ง `SIGTERM`/`SIGHUP` หากหยุดระหว่างพักจะเก็บผลรอบก่อนหน้าไว้และไม่เริ่มรอบใหม่
+`kill -9` ไม่สามารถทำ final export ได้ แต่ผลที่บันทึกไปแล้วจะยังอยู่

@@ -1,27 +1,17 @@
+"""Local username generation and compatibility account-file writers. No network I/O."""
 import random
-import requests
+import secrets
 import sys
-import uuid
-import hmac
 import os
-import hashlib
-import re
-import asyncio
 import json
 import tempfile
-from urllib.parse import quote
-from lib.proxies import parse_proxy
-from DrissionPage import errors
+from pathlib import Path
 from datetime import datetime
-from pymailtm import MailTm, Account
 
 
 def getResourcePath(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    base_path = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)
+    return str(Path(base_path) / relative_path)
 
 
 class UsernameGenerator:
@@ -115,302 +105,11 @@ class UsernameGenerator:
             return self.VOW_WEIGHTED[weight][random.randrange(len(self.VOW_WEIGHTED[weight]))]
 
 
-class Main():
-    def usernameCreator(self, nameFormat=None, scrambled=False):
-        counter = 0
-        maxAttempts = 100
-
-        for attempt in range(maxAttempts):
-            try:
-                if nameFormat:
-                    username = f"{nameFormat}_{counter}"
-                    counter += 1
-                else:
-                    if scrambled is True:
-                        username = self.generateUsername(scrambled=True)
-                    else:
-                        username = self.generateUsername(scrambled=False)
-
-                try:
-                    r = requests.get(
-                        f"https://auth.roblox.com/v2/usernames/validate?request.username={username}&request.birthday=04%2F15%2F02&request.context=Signup",
-                        timeout=10
-                    ).json()
-                except (requests.exceptions.RequestException, ValueError, KeyError) as e:
-                    print(f"Error validating username {username}: {e}")
-                    continue
-
-                if r.get("code") == 0:
-                    return username
-                else:
-                    if nameFormat and attempt >= maxAttempts - 1:
-                        return self.generateUsername(scrambled=True)
-                    continue
-            except Exception as e:
-                print(f"Error validating username: {e}")
-                if attempt >= maxAttempts - 1:
-                    return self.generateUsername(scrambled=True)
-                continue
-
-        return self.generateUsername(scrambled=True)
-
-    async def checkUpdate(self):
-        try:
-            resp = requests.get(
-                "https://api.github.com/repos/qing762/roblox-auto-signup/releases/latest",
-                timeout=10
-            )
-            resp.raise_for_status()
-            response_data = resp.json()
-            latestVer = response_data.get("tag_name", "unknown")
-
-            if getattr(sys, 'frozen', False):
-                try:
-                    import version  # type: ignore
-                    currentVer = version.__version__
-                except ImportError:
-                    currentVer = "unknown"
-            else:
-                try:
-                    with open("version.txt", "r", encoding="utf-8") as file:
-                        currentVer = file.read().strip()
-                except FileNotFoundError:
-                    currentVer = "unknown"
-
-            if currentVer != "unknown" and currentVer < latestVer:
-                print(f"Update available: {latestVer} (Current version: {currentVer})\nYou can download the latest version from: https://github.com/qing762/roblox-auto-signup/releases/latest")
-                return currentVer
-            else:
-                print(f"You are running the latest version: {currentVer}")
-                return currentVer
-        except requests.exceptions.Timeout:
-            print("Update check timed out. Continuing with current version.")
-            return "unknown"
-        except requests.exceptions.RequestException as e:
-            print(f"Failed to check for updates: {e}")
-            return "unknown"
-        except Exception as e:
-            print(f"An error occurred during update check: {e}")
-            return "unknown"
-
-    async def checkPassword(self, username, password):
-        try:
-            token = requests.post("https://auth.roblox.com/v2/login", headers={"User-Agent": "Mozilla/5.0"}, timeout=10).headers.get("x-csrf-token")
-            data = {
-                "username": username,
-                "password": password
-            }
-            headers = {
-                "accept": "application/json, text/plain, */*",
-                "accept-encoding": "gzip, deflate, br, zstd",
-                "accept-language": "en-US,en;q=0.6",
-                "content-type": "application/json;charset=UTF-8",
-                "origin": "https://www.roblox.com",
-                "referer": "https://www.roblox.com",
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-                "x-csrf-token": token
-            }
-            try:
-                resp = requests.post("https://auth.roblox.com/v2/passwords/validate", json=data, headers=headers, timeout=10).json()
-                if resp.get("code") == 0:
-                    return "\nPassword is valid"
-                else:
-                    return f"\nPassword does not meet the requirements: {resp.get('message', 'Unknown error')}"
-            except (requests.exceptions.RequestException, ValueError, KeyError) as e:
-                return f"\nPassword validation failed: {e}"
-        except Exception as e:
-            return f"\nPassword validation error: {e}"
-
-    async def customization(self, tab):
-        try:
-            tab.listen.start('https://avatar.roblox.com/v1/avatar-inventory?sortOption=recentAdded&pageLimit=50')
-            tab.get("https://www.roblox.com/my/avatar")
-            result = tab.listen.wait(timeout=10)
-            content = result.response.body
-            assetDict = {}
-            for item in content.get('avatarInventoryItems', []):
-                if 'itemCategory' in item and 'itemSubType' in item['itemCategory']:
-                    assetType = item["itemCategory"]["itemSubType"]
-                    if assetType not in assetDict:
-                        assetDict[assetType] = []
-                    assetDict[assetType].append(item)
-            tab.listen.stop()
-
-            selectedAssets = {}
-            for assetType, assets in assetDict.items():
-                selectedAssets[assetType] = random.choice(assets)
-
-            for assetType, asset in selectedAssets.items():
-                try:
-                    for z in tab.ele(".hlist item-cards-stackable").eles("tag:li"):
-                        if z.ele("tag:a").attr("data-item-name") == asset.get("itemName"):
-                            z.ele("tag:a").click()
-                            break
-                except Exception as e:
-                    print(f"Warning: Could not click asset {asset.get('itemName', 'unknown')}: {e}")
-        except Exception as e:
-            print(f"Warning: Avatar customization failed: {e}")
-            return
-
-        bodyType = random.choice([i for i in range(0, 101, 5)])
-        try:
-            tab.run_js_loaded(f'document.getElementById("body type-scale").value = {bodyType};')
-            tab.run_js_loaded('document.getElementById("body type-scale").dispatchEvent(new Event("input"));')
-        except errors.JavaScriptError:
-            tab.run_js_loaded(f'''
-                var slider = document.querySelector('input[aria-label="Body Type Scale"]');
-                if (slider) {{
-                    var muiSlider = slider.closest('.MuiSlider-root');
-                    var rect = muiSlider.getBoundingClientRect();
-                    var targetValue = {bodyType};
-                    var percentage = targetValue / 100;
-                    var targetX = rect.left + (rect.width * percentage);
-                    var targetY = rect.top + (rect.height / 2);
-
-                    muiSlider.dispatchEvent(new MouseEvent('mousedown', {{
-                        bubbles: true,
-                        clientX: targetX,
-                        clientY: targetY,
-                        button: 0
-                    }}));
-
-                    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                    nativeInputValueSetter.call(slider, targetValue);
-
-                    slider.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    slider.dispatchEvent(new Event('change', {{ bubbles: true }}));
-
-                    muiSlider.dispatchEvent(new MouseEvent('mouseup', {{
-                        bubbles: true,
-                        clientX: targetX,
-                        clientY: targetY,
-                        button: 0
-                    }}));
-                }}
-            ''')
-            await asyncio.sleep(2)
-
-    def proxyAuthExtension(self, username, password):
-        # Chrome ignores user:pass in --proxy-server, so answer the proxy's 407 challenge from an extension
-        path = tempfile.mkdtemp(prefix="proxy-auth-")
-        with open(os.path.join(path, "manifest.json"), "w", encoding="utf-8") as f:
-            json.dump({
-                "manifest_version": 3,
-                "name": "Proxy Auth",
-                "version": "1.0",
-                "permissions": ["webRequest", "webRequestAuthProvider"],
-                "host_permissions": ["<all_urls>"],
-                "background": {"service_worker": "background.js"}
-            }, f)
-        with open(os.path.join(path, "background.js"), "w", encoding="utf-8") as f:
-            f.write(
-                "chrome.webRequest.onAuthRequired.addListener(\n"
-                f"  (details, callback) => callback(details.isProxy ? {{authCredentials: {{username: {json.dumps(username)}, password: {json.dumps(password)}}}}} : {{}}),\n"
-                "  {urls: ['<all_urls>']},\n"
-                "  ['asyncBlocking']\n"
-                ");\n"
-            )
-        return path
-
-    def fetchProxyList(self, url):
-        # Webshare download link: one ip:port:username:password per line
-        # ponytail: keeps the last login only, fine while every Webshare proxy shares the same one
-        response = requests.get(url, timeout=15)
-        proxies, auth = [], None
-        for line in response.text.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) == 4 and parts[1].isdigit():
-                proxies.append(f"http://{parts[0]}:{parts[1]}")
-                auth = (parts[2], parts[3])
-        if not proxies:
-            raise Exception(response.text.strip()[:200] or f"status {response.status_code}, empty response")
-        return proxies, auth
-
-    def testProxy(self, proxy, auth=None):
-        if not proxy or not proxy.strip():
-            return False, "Empty proxy provided"
-
-        try:
-            if isinstance(auth, str):
-                auth = tuple(auth.split(":", 1))
-            parsed = parse_proxy(proxy, auth)
-        except ValueError as exc:
-            return False, str(exc)
-        proxy, auth = parsed.server, parsed.auth
-
-        try:
-            # Encode credentials for Requests; Chromium receives only the endpoint.
-            encoded_auth = ":".join(quote(part, safe="") for part in auth) if auth else None
-            url = proxy.replace("://", f"://{encoded_auth}@", 1) if encoded_auth else proxy
-            response = requests.get("http://www.google.com", proxies={"http": url, "https": url}, timeout=10)
-            if response.status_code == 200:
-                return True, f"Proxy {proxy} is working"
-            else:
-                return False, f"Proxy {proxy} returned status code {response.status_code}"
-        except requests.exceptions.Timeout:
-            return False, f"Proxy {proxy} timed out"
-        except requests.exceptions.ConnectionError:
-            return False, f"Proxy {proxy} connection failed"
-        except Exception as e:
-            return False, f"Proxy {proxy} test failed ({type(e).__name__})"
-
-    async def generateEmail(self, password="Qing762.chy"):
-        if not hasattr(self, 'mailtm'):
-            self.mailtm = MailTm()
-
-        maxRetries = 3
-        for attempt in range(maxRetries):
-            try:
-                domainList = self.mailtm._get_domains_list()
-                if not domainList:
-                    raise Exception("No domains available")
-
-                domain = random.choice(domainList)
-                username = self.generateUsername().lower()
-                address = f"{username}@{domain}"
-
-                emailID = requests.post("https://api.mail.tm/accounts", json={"address": address, "password": password}, timeout=10)
-                if emailID.status_code == 201:
-                    try:
-                        emailID_data = emailID.json()
-                        if "id" in emailID_data:
-                            token_response = requests.post(
-                                "https://api.mail.tm/token",
-                                json={"address": address, "password": password},
-                                timeout=10
-                            )
-                            if token_response.status_code == 200:
-                                token_data = token_response.json()
-                                if "token" in token_data:
-                                    return address, password, token_data["token"], emailID
-                                else:
-                                    raise Exception("Token not found in response")
-                            else:
-                                raise Exception(f"Token request failed with status {token_response.status_code}")
-                    except (ValueError, KeyError) as json_error:
-                        raise Exception(f"Invalid JSON response: {json_error}")
-                else:
-                    if attempt < maxRetries - 1:
-                        print(f"Failed to create email with address {address} (HTTP {emailID.status_code}). Retrying attempt {attempt + 2}/{maxRetries}...")
-                        await asyncio.sleep(5)
-                    else:
-                        raise Exception(f"Failed to create email after {maxRetries} attempts")
-            except Exception as e:
-                if attempt < maxRetries - 1:
-                    print(f"Error creating email: {e}. Retrying attempt {attempt + 2}/{maxRetries}...")
-                    await asyncio.sleep(5)
-                else:
-                    raise Exception(f"Failed to create email after {maxRetries} attempts: {e}")
-
-    def fetchVerification(self, address=None, password=None, emailID=None):
-        if not address or not password or not emailID:
-            raise ValueError("Address, password, and emailID must be provided.")
-        if not hasattr(self, 'mailtm'):
-            self.mailtm = MailTm()
-        if getattr(self, 'account', None) is None or self.account.address != address:
-            self.account = Account(emailID, address, password)
-        messages = self.account.get_messages()
-        return messages
+class Main:
+    def usernameCreator(self, nameFormat=None, scrambled=True):
+        if nameFormat:
+            return nameFormat[:12] + "_" + str(secrets.randbelow(1000000)).zfill(6)
+        return self.generateUsername(scrambled=scrambled)
 
     def generateUsername(self, scrambled=None):
         if scrambled is False:
@@ -429,7 +128,7 @@ class Main():
                 noun = random.choice(nouns).strip()
                 adjective = random.choice(adjectives).strip()
                 number = random.randint(10, 99)
-                username = verb + noun + adjective + str(number)
+                username = (verb + noun + adjective)[:18] + str(number)
                 return username
             except FileNotFoundError as e:
                 print(f"Warning: Required text files not found: {e}. Falling back to scrambled username.")
@@ -442,45 +141,6 @@ class Main():
         else:
             gen = UsernameGenerator(10, 15)
             return gen.generate()
-
-    async def followUser(self, user, tab):
-        userIDList = []
-        for x in user:
-            try:
-                response = requests.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [x]}, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-
-                if not data.get("data") or len(data["data"]) == 0:
-                    print(f"User {x} not found!")
-                    continue
-
-                userID = data["data"][0]["id"]
-                url = f"https://www.roblox.com/users/{userID}/profile"
-                tab.get(url)
-
-                await asyncio.sleep(2)
-
-                try:
-                    tab.ele('xpath://*[@id="user-profile-header-contextual-menu-button"]', timeout=5).click()
-                    tab.ele('xpath://*[@id="radix-9"]/div/div/button[1]', timeout=5).click()
-                    userIDList.append(userID)
-                    print(f"Successfully followed user {x}")
-                except errors.ElementNotFoundError:
-                    print(f"Could not find follow button for user {x}")
-                except Exception as e:
-                    print(f"Error clicking follow button for user {x}: {e}")
-
-                await asyncio.sleep(0.5)
-            except requests.exceptions.Timeout:
-                print(f"Timeout when looking up user {x}")
-            except requests.exceptions.RequestException as e:
-                print(f"Network error when looking up user {x}: {e}")
-            except KeyError as e:
-                print(f"User {x} not found or invalid response format: {e}")
-            except Exception as e:
-                print(f"Unexpected error when following user {x}: {e}")
-        return userIDList
 
     async def saveAccount(self, account):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -527,7 +187,3 @@ class Main():
                 f.write(f"{username},{status},{seconds:.1f},{'; '.join(stages)}\n")
         except Exception as e:
             print(f"Error writing to timings.csv: {e}")
-
-
-if __name__ == "__main__":
-    print("This is a library file. Please run main.py instead.")

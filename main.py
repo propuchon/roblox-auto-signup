@@ -1,696 +1,656 @@
-import asyncio
-import warnings
-import os
-import sys
-import re
-import pyperclip
-import random
-import secrets
-import gc
-import time
+"""Run headless, visible-browser or HTTP signup with live exports and byte counts."""
+
 import argparse
-import shutil
-from pathlib import Path
+import asyncio
+from contextlib import contextmanager
 from datetime import date, timedelta
-from DrissionPage import Chromium, ChromiumOptions, errors
-from tqdm import TqdmExperimentalWarning
-from tqdm.rich import tqdm
+import math
+from itertools import count as iteration_count
+import os
+from pathlib import Path
+import random
+import re
+import secrets
+import sys
+import time
+
+from config import value_source
+from lib.diagnostics import close_logger, create_logger
+from lib.http_signup import (
+    CaptchaDetected,
+    DEFAULT_USER_AGENT,
+    RateLimited,
+    SignupClient,
+)
 from lib.lib import Main
 from lib.proxies import parse_proxy, split_proxy_list
 from lib.run_export import RunExport
-from lib.shutdown import StopRequested, stop_signals
-from config import ask
+from lib.shutdown import StopRequested, defer_stop_signals, stop_signals
 
 
-warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
-warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
-
-# Maximum signup wait; a detected CAPTCHA stops the run immediately.
-SIGNUP_TIMEOUT = 180
-
-
-class CaptchaDetected(RuntimeError):
-    pass
-
-
-async def humanized_move_click(element, headless=False):
-    """Click through Chromium; use the existing delayed click in windowed mode."""
-    if headless:
-        # DrissionPage clicks through Chromium's protocol, without a desktop mouse.
-        element.click()
-        return
+def delay_range(key, default):
+    value = os.environ.get(key) or default
     try:
-        # Random delay before click (like human hesitation)
-        await asyncio.sleep(random.uniform(0.05, 0.2))
-        # JavaScript click — no system mouse involved
-        element.run_js("arguments[0].click();", element)
-    except Exception:
-        element.click()
-
-
-async def fill_field(element, value, headless=False):
-    """Use protocol input in headless mode; retain gradual typing in windowed mode."""
-    element.clear()
-    if headless:
-        # clear=True skips input focus on macOS in the installed DrissionPage.
-        # A separate clear followed by input focuses the field and emits input events.
-        element.input(value, clear=False)
-    else:
-        for char in value:
-            element.input(char, clear=False)
-            await asyncio.sleep(random.uniform(0.05, 0.15))
-
-
-def verification_required(page):
-    selectors = (
-        'css:[data-qa-id="captcha"], .captcha-modal, .captcha-container, '
-        'iframe[src*="arkoselabs"], iframe[src*="funcaptcha"], '
-        'iframe[title*="challenge"], iframe[title*="Challenge"]'
-    )
-    return any(element.states.is_displayed for element in page.eles(selectors, timeout=0.2))
-
-
-async def wait_for_signup(page, headless=False):
-    deadline = time.monotonic() + SIGNUP_TIMEOUT
-    while time.monotonic() < deadline and "/home" not in page.url:
-        if verification_required(page):
-            raise CaptchaDetected("CAPTCHA detected; stopping the entire run.")
-        await asyncio.sleep(1)
-    if not any(cookie["name"] == ".ROBLOSECURITY" for cookie in page.cookies()):
-        hint = " Run with --no-headless to inspect the form." if headless else ""
-        raise RuntimeError(f"Signup not finished within {SIGNUP_TIMEOUT}s (no login cookie).{hint}")
-
-
-def closeBrowser(chrome, page):
-    """Complete cleanup even if one browser operation fails."""
-    for label, operation in (
-        ("tab cookies", lambda: page.set.cookies.clear()),
-        ("tab cache", lambda: page.clear_cache()),
-        ("browser cookies", lambda: chrome.set.cookies.clear()),
-        ("browser cache", lambda: chrome.clear_cache()),
-        ("browser close", lambda: chrome.quit()),
-    ):
-        try:
-            operation()
-        except Exception:
-            print(f"Warning: Could not complete {label} cleanup.")
-
-
-def get_browser_path():
-    """Get browser path from user, empty means system Chrome."""
-    browser_prompt = (
-        "\033[1m\n(RECOMMENDED) Press enter to use default browser path\033[0m\n"
-        "Or enter path to Chrome, Brave, Chromium, etc.\n"
-        "Examples: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\n"
-        "Browser path: "
-    )
-
-    while True:
-        browser_path = (
-            ask("BROWSER_PATH", browser_prompt).replace('"', "").replace("'", "")
-        )
-        if not browser_path:
-            return browser_path
-
-        if any(
-            char in browser_path
-            for char in ["&", "|", ";", "$", "`", "(", ")", "{", "}", "[", "]"]
+        parts = value.split(",")
+        if len(parts) != 2:
+            raise ValueError
+        low, high = (float(part.strip()) for part in parts)
+        if (
+            not all(math.isfinite(number) for number in (low, high))
+            or not 0 <= low <= high
         ):
-            print("Invalid characters detected.")
-            continue
-        if browser_path.lower().endswith((".exe", ".app", ".bin")) or os.name != "nt":
-            if os.path.exists(browser_path):
-                return browser_path
-            else:
-                print("Path does not exist.")
-        else:
-            print("Browser path should end with .exe on Windows.")
+            raise ValueError
+        return low, high
+    except ValueError:
+        raise ValueError(
+            f"{key} must be min,max seconds with finite values and 0 <= min <= max"
+        ) from None
 
 
-async def gather_config(cli_account_count=None):
-    """Gather all user configuration upfront."""
-    lib = Main()
-
-    # Browser
-    browser_path = get_browser_path()
-
-    # Password
-    fixed_password = ""
-    while True:
-        pwd = ask(
-            "PASSWORD",
-            "\033[1m(RECOMMENDED) Press enter for random password per account\033[0m\n"
-            "Password: ",
-        )
-        if not pwd:
-            break
-        result = await lib.checkPassword(lib.usernameCreator(), pwd)
-        if "Password is valid" in result:
-            fixed_password = pwd
-            break
-        print(result)
-
-    # Email verification
-    verification = False
-    while True:
-        v = ask(
-            "EMAIL_VERIFICATION", "\nEnable email verification? [y/n] (Default: No): "
-        )
-        if v.lower() in ["y", "n", ""]:
-            verification = v.lower() == "y"
-            break
-
-    # Username format
-    name_format = ask(
-        "NAME_PREFIX",
-        "\033[1m(RECOMMENDED) Press enter for randomized prefix\033[0m\n"
-        "Name prefix (e.g., 'qing' -> 'qing_0', 'qing_1'): ",
+def gather_config(cli_account_count=None):
+    count = (
+        cli_account_count
+        if cli_account_count is not None
+        else int(os.environ.get("ACCOUNT_COUNT") or "0")
     )
-
-    scrambled = True
-    if not name_format:
-        while True:
-            s = ask(
-                "SCRAMBLED_USERNAME", "Use scrambled username? [y/n] (Default: Yes): "
-            )
-            if s.lower() in ["y", "n", ""]:
-                scrambled = s.lower() != "n"
-                break
-
-    # Post-signup customization
-    customization = False
-    while True:
-        c = ask(
-            "CUSTOMIZATION",
-            "Customize account after generation? [y/n] (Default: Yes): ",
-        )
-        if c.lower() in ["y", "n", ""]:
-            customization = c.lower() != "n"
-            break
-
-    # Follow users
-    follow_str = ask(
-        "FOLLOW_USERS",
-        "Follow users after signup? Enter usernames comma-separated (leave blank for none): ",
-    )
-    follow_list = []
-    if follow_str:
-        follow_list = [u.strip() for u in follow_str.split(",") if u.strip()]
-        follow_list = [
-            u for u in follow_list if re.match(r"^[a-zA-Z0-9_]+$", u) and len(u) <= 20
-        ]
-        if not follow_list:
-            print("No valid usernames found.")
-
-    # Proxies
-    proxy_str = ask(
-        "PROXIES", "Proxies: [username:password@]host:port, comma-separated (blank for none): "
-    )
-    proxy_list = split_proxy_list(proxy_str)
+    if count < 0:
+        raise ValueError("ACCOUNT_COUNT must be nonnegative (0 = unlimited)")
+    prefix = os.environ.get("NAME_PREFIX", "").strip()
+    if prefix and not re.fullmatch(r"[A-Za-z0-9_]+", prefix):
+        raise ValueError("NAME_PREFIX must contain only letters, digits or underscores")
+    birthday = os.environ.get("BIRTHDAY", "").strip()
+    if birthday:
+        birthday = date.fromisoformat(birthday).isoformat()
+        if date.fromisoformat(birthday) >= date.today():
+            raise ValueError("BIRTHDAY must be in the past (YYYY-MM-DD)")
+    entries = split_proxy_list(os.environ.get("PROXIES", ""))
     proxy_file = os.environ.get("PROXY_FILE", "").strip()
     if proxy_file:
         path = Path(proxy_file).expanduser()
         if not path.is_absolute():
             path = Path(__file__).resolve().parent / path
-        proxy_list.extend(split_proxy_list(path.read_text(encoding="utf-8")))
-
-    # Incognito
-    incognito = False
-    while True:
-        i = ask("INCOGNITO", "Use incognito mode? [y/n] (Default: Yes): ")
-        if i.lower() in ["y", "n", ""]:
-            incognito = i.lower() != "n"
-            break
-
-    # Account count
-    count = cli_account_count or 1
-    if not cli_account_count:
-        while True:
-            c = ask("ACCOUNT_COUNT", "Number of accounts to generate (Default: 1): ")
-            try:
-                count = int(c) if c else 1
-                if count <= 0:
-                    print("Please enter positive number.")
-                    continue
-                if count > 100:
-                    if (
-                        input(
-                            "Generating >100 accounts takes long time. Continue? [y/n]: "
-                        ).lower()
-                        != "y"
-                    ):
-                        continue
-                break
-            except ValueError:
-                print("Invalid number.")
-    else:
-        if count > 100:
-            if (
-                input(
-                    "Generating >100 accounts takes long time. Continue? [y/n]: "
-                ).lower()
-                != "y"
-            ):
-                sys.exit("Aborted.")
-
-    return {
-        "browser_path": browser_path,
-        "fixed_password": fixed_password,
-        "verification": verification,
-        "name_format": name_format,
-        "scrambled": scrambled,
-        "customization": customization,
-        "follow_list": follow_list,
-        "proxy_list": proxy_list,
-        "incognito": incognito,
-        "account_count": count,
-    }
-
-
-def setup_browser(lib, config, proxy_auth):
-    """Setup Chromium browser options."""
-    co = ChromiumOptions()
-    co.set_argument("--lang", "en")
-    co.auto_port().mute(True)
-    co.headless(config.get("headless", False))
-    if config.get("headless", False):
-        co.set_argument("--window-size", "1280,900")
-
-    if config["browser_path"]:
-        co.set_browser_path(config["browser_path"])
-
-    # Each browser gets only its own proxy's authentication extension.
-    extension_path = None
-    try:
-        if proxy_auth:
-            extension_path = lib.proxyAuthExtension(*proxy_auth)
-            co.add_extension(extension_path)
-        elif config["incognito"]:
-            co.incognito()
-        return co, extension_path
-    except BaseException:
-        if extension_path:
-            shutil.rmtree(extension_path, ignore_errors=True)
-        raise
-
-
-def setup_proxies(lib, config):
-    """Setup and test proxies."""
-    proxy_auth = None
-    usable_proxies = []
-
-    if not config["proxy_list"]:
-        return usable_proxies
-
-    # Inline credentials override these optional shared defaults.
-    proxy_user = os.environ.get("PROXY_USERNAME", "")
-    proxy_pass = os.environ.get("PROXY_PASSWORD", "")
-    if proxy_user:
-        proxy_auth = (proxy_user, proxy_pass)
-
-    seen = set()
-    for index, value in enumerate(config["proxy_list"], start=1):
-        try:
-            proxy = parse_proxy(value, proxy_auth)
-        except ValueError as exc:
-            sys.exit(f"Invalid proxy entry {index}: {exc}")
-        if proxy in seen:
-            continue
-        seen.add(proxy)
-        result = lib.testProxy(proxy.server, proxy.auth)
-        if result[0]:
-            usable_proxies.append(proxy)
-        else:
-            print(result[1])
-
-    if config["proxy_list"] and not usable_proxies:
-        sys.exit("No working proxies. Aborting.")
-
-    return usable_proxies
-
-
-async def run_signup(page, username, password, x, total, bar, logStage, headless=False):
-    """Fill and submit the signup form. Raises on any page error."""
-    page.get("https://www.roblox.com/CreateAccount")
-    if verification_required(page):
-        raise CaptchaDetected("CAPTCHA detected; stopping the entire run.")
-
-    try:
-        page.ele(
-            "@class=btn-cta-lg cookie-btn btn-primary-md btn-min-width", timeout=3
-        ).click()
-    except errors.ElementNotFoundError:
-        pass
-
-    # Birthday — direct fill
-    birthday = date(2000, 1, 1) + timedelta(
-        days=random.randrange((date(2008, 1, 1) - date(2000, 1, 1)).days)
+        entries.extend(split_proxy_list(path.read_text(encoding="utf-8")))
+    shared_user = os.environ.get("PROXY_USERNAME", "")
+    shared = (
+        (shared_user, os.environ.get("PROXY_PASSWORD", "")) if shared_user else None
     )
-    months = [
-        "Jan",
-        "Feb",
-        "Mar",
-        "Apr",
-        "May",
-        "Jun",
-        "Jul",
-        "Aug",
-        "Sep",
-        "Oct",
-        "Nov",
-        "Dec",
-    ]
-    # Option values are "Jan", "01", "2004" (texts are "January", "01", "2004"), so select by value
-    for dropdown, value in (
-        ("#MonthDropdown", months[birthday.month - 1]),
-        ("#DayDropdown", f"{birthday.day:02d}"),
-        ("#YearDropdown", str(birthday.year)),
-    ):
-        page.ele(dropdown, timeout=10).select.by_value(
-            value
-        )  # raises RuntimeError if option missing
-        await asyncio.sleep(random.uniform(0.05, 0.15))
-
-    # Both modes keep browser input events; headless sends each complete value.
-    username_field = page.ele("#signup-username", timeout=10)
-    await fill_field(username_field, username, headless)
-
-    password_field = page.ele("#signup-password", timeout=10)
-    await fill_field(password_field, password, headless)
-
-    await asyncio.sleep(random.uniform(0, 0.3))
-
-    try:
-        checkbox = page.ele("@@id=signup-checkbox@@class=checkbox")
-        await humanized_move_click(checkbox, headless)
-    except errors.ElementNotFoundError:
-        pass
-
-    await asyncio.sleep(random.uniform(0, 0.7))
-
-    signup_btn = page.ele("@@id=signup-button@@name=signupSubmit", timeout=10)
-    await humanized_move_click(signup_btn, headless)
-    logStage(f"Signup submitted [{x + 1}/{total}]")
-    bar.update(20)
-
-    # Korean compliance
-    if page.ele("#compliance-privacy-policy-0", timeout=2):
-        print("\nKorean compliance detected, accepting...\n")
-        await humanized_move_click(
-            page.ele("@@id=compliance-privacy-policy-0@@class=checkbox"), headless
-        )
-        await humanized_move_click(
-            page.ele("@@id=compliance-privacy-policy-1@@class=checkbox"), headless
-        )
-        await humanized_move_click(
-            page.ele("@@id=compliance-privacy-policy-3@@class=checkbox"), headless
-        )
-        await humanized_move_click(
-            page.ele("@@id=compliance-privacy-policy-4@@class=checkbox"), headless
-        )
-        await humanized_move_click(
-            page.ele(
-                "@@id=signup-agreements-button@@class=btn-primary-md signup-submit-button btn-full-width@@name=signupAgreementsSubmit"
-            ), headless
-        )
+    proxies = []
+    for index, entry in enumerate(entries, 1):
+        try:
+            proxy = parse_proxy(entry, shared)
+        except ValueError as exc:
+            raise ValueError(f"Invalid proxy entry {index}: {exc}") from None
+        if proxy not in proxies:
+            proxies.append(proxy)
+    return dict(
+        account_count=count,
+        proxies=proxies,
+        birthday=birthday,
+        fixed_password=os.environ.get("PASSWORD", ""),
+        name_format=prefix,
+        scrambled=os.environ.get("SCRAMBLED_USERNAME", "y").lower() != "n",
+        user_agent=os.environ.get("HTTP_USER_AGENT") or DEFAULT_USER_AGENT,
+        done_delay=delay_range("RANDOM_WHEN_DONE", "30,45"),
+        failed_delay=delay_range("RANDOM_WHEN_FAILED", "60,100"),
+        captcha_wait=delay_range("CAPTCHA_BEFORE_CLOSE", "7,15"),
+    )
 
 
-async def post_process_account(
-    lib,
-    page,
-    config,
-    username,
-    password,
-    email,
-    email_password,
-    x,
-    total,
-    bar,
-    logStage,
+async def main(
+    cli_account_count=None,
+    export_mode="dated",
+    cost_per_gb=0,
+    connect_timeout=10,
+    read_timeout=30,
+    request_timeout=60,
+    heartbeat=5,
+    mode="browser",
+    browser_path=None,
+    no_progress=False,
+    quiet=False,
 ):
-    """Email verification, customization, following. Returns (success, cookies)."""
-    accountCookies = []
-
-    try:
-        if config["verification"] and email:
-            logStage(f"Adding email [{x + 1}/{total}]")
-            page.get("https://www.roblox.com/my/account#!/info")
-            page.ele(
-                "xpath://*[contains(text(),'Email')]/ancestor::div[.//button][1]//button[normalize-space()='Add']",
-                timeout=15,
-            ).click()
-            email_field = page.ele("#emailAddress", timeout=10)
-            await fill_field(email_field, email, config.get("headless", False))
-            page.ele("@@tag()=button@@text()=Add Email", timeout=10).click()
-
-            if page.ele("text:An email has been sent for verification", timeout=15):
-                link = None
-                for _ in range(30):
-                    try:
-                        messages = lib.fetchVerification(email, email_password, email)
-                    except Exception as e:
-                        print(f"Error checking email: {e}")
-                        messages = []
-
-                    for msg in messages:
-                        body = getattr(msg, "text", None) or (
-                            msg.html[0] if getattr(msg, "html", None) else ""
-                        )
-                        match = re.search(
-                            r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+',
-                            body,
-                        )
-                        if match:
-                            link = match.group(0)
-                            break
-
-                    if link:
-                        break
-                    await asyncio.sleep(5)
-
-                if link:
-                    logStage(f"Verifying email [{x + 1}/{total}]")
-                    page.get(link)
-                    await asyncio.sleep(3)
-                else:
-                    print("Email verification timeout")
-                    bar.update(10)
-
-        logStage(f"Saving data [{x + 1}/{total}]")
-        for cookie in page.cookies():
-            accountCookies.append(
-                {
-                    "name": cookie["name"],
-                    "value": cookie["value"],
-                }
-            )
-        bar.update(5)
-
-        if config["customization"]:
-            logStage(f"Customizing [{x + 1}/{total}]")
-            await lib.customization(page)
-            bar.update(5)
-
-        if config["follow_list"]:
-            logStage(f"Following users [{x + 1}/{total}]")
-            try:
-                await lib.followUser(config["follow_list"], page)
-            except Exception as e:
-                print(f"Follow error: {e}")
-            bar.update(5)
-
-        return True, accountCookies
-
-    except CaptchaDetected:
-        raise
-    except Exception as e:
-        print(f"\nPost-process error: {e}\n")
-        return False, accountCookies
-
-
-async def main(cli_account_count=None, headless=False, export_mode="dated"):
     exporter = RunExport(mode=export_mode)
+    logger = create_logger(
+        exporter.directory / "process.log",
+        exporter.data["run_id"],
+        show_progress=not no_progress,
+        quiet=quiet,
+    )
+    started = time.perf_counter()
     run_status, reason = "failed", None
     try:
-        print(f"Live export ({export_mode}): {exporter.directory}", flush=True)
-        code = await run_workflow(cli_account_count, headless, exporter)
+        exporter.data["mode"] = mode
+        logger.info(
+            "RUN START | mode=%s | export_mode=%s | output=%s",
+            mode,
+            export_mode,
+            exporter.directory,
+        )
+        code = await run_workflow(
+            cli_account_count,
+            exporter,
+            cost_per_gb,
+            logger,
+            connect_timeout,
+            read_timeout,
+            request_timeout,
+            heartbeat,
+            mode,
+            browser_path,
+        )
         run_status = "success" if code == 0 else "failed"
         return code
-    except CaptchaDetected as exc:
-        run_status, reason = "captcha", str(exc)
-        print(reason)
+    except (CaptchaDetected, RateLimited) as exc:
+        run_status = "captcha" if isinstance(exc, CaptchaDetected) else "rate_limited"
+        reason = str(exc)
+        logger.error("RUN BLOCKED | %s", reason)
         return 1
     except (StopRequested, KeyboardInterrupt, asyncio.CancelledError) as exc:
         run_status, reason = "interrupted", str(exc) or "Stopped by user"
+        logger.warning("RUN INTERRUPTED | %s", reason)
         return 128 + exc.signum if isinstance(exc, StopRequested) else 130
     except BaseException as exc:
-        reason = ' '.join(str(exc).split()) or type(exc).__name__
+        reason = str(exc) or type(exc).__name__
+        logger.error("RUN ERROR | %s: %s", type(exc).__name__, reason)
         raise
     finally:
-        exporter.end(run_status, reason)
         try:
-            print(f"Export saved: {exporter.directory}", flush=True)
-        except OSError:
-            pass  # The terminal may already be closed; the files are still saved.
+            logger.info("EXPORT START | finalizing status=%s", run_status)
+            exporter.end(run_status, reason)
+            logger.info("EXPORT DONE | %s", exporter.directory)
+            logger.info(
+                "RUN END | status=%s | elapsed=%.2fs",
+                run_status,
+                time.perf_counter() - started,
+            )
+        finally:
+            close_logger(logger)
 
 
-async def run_workflow(cli_account_count, headless, exporter):
-    lib = Main()
-    print("Checking for updates...")
-    await lib.checkUpdate()
-    print("\nGathering configuration...\n")
-    config = await gather_config(cli_account_count)
-    config["headless"] = headless
-    print(f"Browser mode: {'headless' if headless else 'visible window'}")
+async def wait_before_captcha_close(client, logger, progress, seconds):
+    """Keep the CAPTCHA visible, measuring traffic, without delaying user stops."""
+    deadline = time.monotonic() + seconds
+    logger.warning(
+        "[%s] CAPTCHA detected | checking for successful signup for up to %.2fs before closing; Ctrl+C closes early",
+        client.account_label,
+        seconds,
+    )
+    while True:
+        result = client.confirmed_result()
+        if result:
+            logger.info(
+                "[%s] SIGNUP CONFIRMED | fresh login cookie found during CAPTCHA wait; saving success",
+                client.account_label,
+            )
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        label = f"CAPTCHA detected — closing browser in {math.ceil(remaining)}s"
+        if progress:
+            progress.stage(label)
+        logger.info(
+            "WAIT [%s] %s | received=%d B",
+            client.account_label,
+            label,
+            client.bandwidth()["response_encoded_bytes"],
+        )
+        await asyncio.sleep(min(1, remaining))
+
+
+async def sleep_between_rounds(
+    bounds, status, next_index, total, logger, progress, heartbeat=5
+):
+    seconds = random.uniform(*bounds)
+    if seconds <= 0:
+        return
+    deadline = time.monotonic() + seconds
+    logger.info(
+        "COOLDOWN START | after=%s | range=%g,%gs | selected=%.2fs | next=%d/%s",
+        status,
+        *bounds,
+        seconds,
+        next_index,
+        total or "∞",
+    )
+    next_log = 0
+    try:
+        while True:
+            now = time.monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
+                break
+            label = f"After {status}: next account {next_index}/{total or '∞'} in {math.ceil(remaining)}s"
+            if progress:
+                progress.cooldown(seconds, remaining, label)
+            if now >= next_log:
+                logger.info("WAIT COOLDOWN | %s", label)
+                next_log = now + heartbeat
+            await asyncio.sleep(min(1, remaining))
+    finally:
+        if progress:
+            progress.end_cooldown()
+    logger.info("COOLDOWN DONE | starting account %d/%s", next_index, total or "∞")
+
+
+async def run_workflow(
+    cli_account_count,
+    exporter,
+    cost_per_gb,
+    logger,
+    connect_timeout,
+    read_timeout,
+    request_timeout,
+    heartbeat,
+    mode="browser",
+    browser_path=None,
+):
+    config = gather_config(cli_account_count)
+    uses_browser = mode in {"terminal", "browser"}
     total = config["account_count"]
+    done_delay = config.get("done_delay", (0, 0))
+    failed_delay = config.get("failed_delay", (0, 0))
+    captcha_wait = config.get("captcha_wait", (7, 15))
+    for key, bounds in (
+        ("RANDOM_WHEN_DONE", done_delay),
+        ("RANDOM_WHEN_FAILED", failed_delay),
+        ("CAPTCHA_BEFORE_CLOSE", captcha_wait),
+    ):
+        logger.info("%s=%g,%g seconds (from %s)", key, *bounds, value_source(key))
+    logger.info(
+        "ACCOUNT_COUNT=%d (from %s)",
+        total,
+        "CLI" if cli_account_count is not None else value_source("ACCOUNT_COUNT"),
+    )
+    logger.info(
+        "PASSWORD=%s (from %s)",
+        "[hidden]" if config["fixed_password"] else "[random per account]",
+        value_source("PASSWORD"),
+    )
+    logger.info(
+        "PROXIES=%d unique entries | inline source=%s | file source=%s",
+        len(config["proxies"]),
+        value_source("PROXIES"),
+        value_source("PROXY_FILE"),
+    )
+    for key in (
+        "INCOGNITO",
+        "BROWSER_PATH",
+        "EMAIL_VERIFICATION",
+        "CUSTOMIZATION",
+        "FOLLOW_USERS",
+    ):
+        if key == "BROWSER_PATH" and uses_browser and browser_path is not None:
+            logger.info("BROWSER_PATH=[configured] (from CLI)")
+            continue
+        if key in os.environ:
+            value = os.environ[key].lower()
+            display = (
+                value
+                if key in {"INCOGNITO", "EMAIL_VERIFICATION", "CUSTOMIZATION"}
+                and value in {"y", "n", ""}
+                else "[configured]"
+            )
+            used = uses_browser and key in {"INCOGNITO", "BROWSER_PATH"}
+            logger.info(
+                "%s=%s (from %s; %s)",
+                key,
+                display,
+                value_source(key),
+                "used by browser transport" if used else "ignored in this mode",
+            )
+    if not uses_browser:
+        logger.info(
+            "TIMEOUTS | connect=%gs | read_idle=%gs | request_total=%gs | heartbeat=%gs",
+            connect_timeout,
+            read_timeout,
+            request_timeout,
+            heartbeat,
+        )
+    else:
+        logger.info(
+            "TIMEOUTS | browser_operation=%gs | heartbeat=%gs | connect/read flags apply to http mode only",
+            request_timeout,
+            heartbeat,
+        )
+        logger.info(
+            "BANDWIDTH SCOPE | observed browser page requests/assets via CDP; excludes unobserved frames/workers, background traffic and TLS overhead"
+        )
     exporter.data["requested_count"] = total
     exporter.save()
-    usable_proxies = setup_proxies(lib, config)
-    accounts, failures = [], []
+    lib = Main()
+    if uses_browser:
+        from lib.browser_signup import BrowserSignupClient
 
-    for x in range(total):
-        proxy = usable_proxies[x % len(usable_proxies)] if usable_proxies else None
-        start_time = time.perf_counter()
-        password = config["fixed_password"] or secrets.token_urlsafe(12)
-        username = None
-        stages = []
-        chrome = page = bar = None
-        extension_path = None
-        status, failReason = "interrupted", "Attempt did not finish"
-        exporter.begin(x + 1, password=password, proxy=proxy.server if proxy else None)
-
-        def logStage(desc, *args, **kwargs):
-            stage = desc.split(' [')[0]
-            stages.append(f"{stage}@{time.perf_counter() - start_time:.1f}s")
-            exporter.update(stage=stage, stages=stages[:], seconds=time.perf_counter() - start_time)
-            if page is not None and verification_required(page):
-                raise CaptchaDetected("CAPTCHA detected; stopping the entire run.")
-            setDescription(desc, *args, **kwargs)
-
-        try:
-            bar = tqdm(total=100)
-            setDescription = bar.set_description
-            bar.set_description = logStage
-            logStage(f"Initializing [{x + 1}/{total}]")
-            bar.update(10)
-            if config["name_format"]:
-                username = lib.usernameCreator(config["name_format"])
-            else:
-                username = lib.usernameCreator(None, scrambled=config["scrambled"])
-            exporter.update(username=username)
-            co, extension_path = setup_browser(lib, config, proxy.auth if proxy else None)
-            if proxy:
-                co.set_proxy(proxy.server)
-                print(f"Using proxy: {proxy.server}")
-            email = email_password = None
-            if config["verification"]:
-                email, email_password, _, _ = await lib.generateEmail(password)
-                exporter.update(email=email, emailPassword=email_password)
-
-            chrome = Chromium(addr_or_opts=co)
-            page = chrome.latest_tab
-            if not headless:
-                page.set.window.max()
-            await run_signup(page, username, password, x, total, bar, logStage, headless=headless)
-            logStage(f"Waiting for signup [{x + 1}/{total}]")
-            await wait_for_signup(page, headless)
-
-            # Persist login data before optional steps or browser cleanup can fail.
-            cookies = [{"name": cookie["name"], "value": cookie["value"]} for cookie in page.cookies()]
-            account = dict(username=username, password=password, email=email,
-                           emailPassword=email_password, cookies=cookies)
-            exporter.update(**account, account_created=True, stage="Signed in")
-            bar.update(10)
-            processed, processed_cookies = await post_process_account(
-                lib, page, config, username, password, email, email_password,
-                x, total, bar, logStage,
+        client = BrowserSignupClient(
+            browser_path=browser_path or os.environ.get("BROWSER_PATH", ""),
+            incognito=os.environ.get("INCOGNITO", "n").lower() == "y",
+            headless=mode == "terminal",
+        )
+    else:
+        client = SignupClient(user_agent=config["user_agent"])
+    logger.info(
+        "TRANSPORT | mode=%s | engine=%s | headless=%s",
+        mode,
+        "browser" if uses_browser else "requests",
+        mode == "terminal" if uses_browser else "n/a",
+    )
+    client.logger = logger
+    client.timeout = (connect_timeout, read_timeout)
+    client.request_timeout = request_timeout
+    client.heartbeat = heartbeat
+    progress = getattr(logger, "progress", None)
+    if progress:
+        progress.start(total, client.bandwidth)
+    successes = failures = 0
+    try:
+        for index in (iteration_count() if total == 0 else range(total)):
+            client.account_label = f"{index + 1}/{total or '∞'}"
+            proxy = (
+                config["proxies"][index % len(config["proxies"])]
+                if config["proxies"]
+                else None
             )
-            if verification_required(page):
-                raise CaptchaDetected("CAPTCHA detected; stopping the entire run.")
-            if processed_cookies:
-                account["cookies"] = processed_cookies
-            exporter.update(**account)
-            await lib.saveAccount(account)
-            accounts.append(account)
-            status = "success"
-            failReason = None if processed else "Signup succeeded; optional post-processing failed"
-        except CaptchaDetected as exc:
-            status, failReason = "failed", str(exc)
-            raise
-        except (StopRequested, KeyboardInterrupt, asyncio.CancelledError) as exc:
-            status, failReason = "interrupted", str(exc) or "Stopped by user"
-            raise
-        except Exception as exc:
-            status, failReason = "failed", f"Error: {' '.join(str(exc).split())}"
-            # A challenge can replace a form element before the next stage check.
-            if page is not None:
+            logger.info(
+                "[%s] ACCOUNT START | Using proxy: %s",
+                client.account_label,
+                proxy.server if proxy else "none (direct connection)",
+            )
+            started = time.perf_counter()
+            password = config["fixed_password"] or secrets.token_urlsafe(12)
+            status, reason = "interrupted", "Attempt did not finish"
+            stages = []
+            if progress:
+                progress.begin(index + 1, total)
+            exporter.begin(
+                index + 1, password=password, proxy=proxy.server if proxy else None
+            )
+
+            @contextmanager
+            def stage(label):
+                if progress:
+                    progress.stage(label)
+                stage_started = time.perf_counter()
+                stages.append(f"{label}@{time.perf_counter() - started:.1f}s")
+                exporter.update(
+                    stage=label, stages=stages[:], bandwidth=client.bandwidth()
+                )
+                logger.info(
+                    "[%s] STAGE START | %s | account_elapsed=%.2fs",
+                    client.account_label,
+                    label,
+                    time.perf_counter() - started,
+                )
                 try:
-                    captcha = verification_required(page)
-                except Exception:
-                    captcha = False
-                if captcha:
-                    failReason = "CAPTCHA detected; stopping the entire run."
-                    raise CaptchaDetected(failReason) from None
-        finally:
+                    yield
+                except BaseException as exc:
+                    logger.error(
+                        "[%s] STAGE FAILED | %s | elapsed=%.2fs | %s: %s",
+                        client.account_label,
+                        label,
+                        time.perf_counter() - stage_started,
+                        type(exc).__name__,
+                        str(exc) or "interrupted",
+                    )
+                    raise
+                else:
+                    if progress:
+                        progress.advance()
+                    logger.info(
+                        "[%s] STAGE DONE | %s | elapsed=%.2fs",
+                        client.account_label,
+                        label,
+                        time.perf_counter() - stage_started,
+                    )
+
+            async def recover_captcha(error):
+                if not uses_browser:
+                    raise error
+                seconds = random.uniform(*captcha_wait)
+                exporter.update(
+                    reason=str(error),
+                    stage=f"CAPTCHA detected; checking signup for {seconds:.2f}s",
+                    bandwidth=client.bandwidth(),
+                )
+                confirmed = await wait_before_captcha_close(client, logger, progress, seconds)
+                if confirmed is None:
+                    raise error
+                return confirmed
+
             try:
-                exporter.finish(status, failReason, seconds=time.perf_counter() - start_time,
-                                stages=stages[:])
+                with stage("Open browser" if uses_browser else "Reset HTTP session"):
+                    client.begin_round(proxy)
+                logger.info(
+                    "[%s] RESET DONE | %s",
+                    client.account_label,
+                    (
+                        "fresh browser profile; cookies/cache cleared"
+                        if uses_browser
+                        else "cookies and CSRF cleared; no body cache"
+                    ),
+                )
+                username = lib.usernameCreator(
+                    config["name_format"], scrambled=config["scrambled"]
+                )
+                birthday = (
+                    config["birthday"]
+                    or (
+                        date(2000, 1, 1) + timedelta(days=random.randrange(2922))
+                    ).isoformat()
+                )
+                exporter.update(username=username, birthday=birthday)
+                result = None
+                with stage("Open signup page" if uses_browser else "GET signup form"):
+                    try:
+                        client.load_form()
+                    except CaptchaDetected as exc:
+                        result = await recover_captcha(exc)
+                with stage(
+                    "Fill form and click Sign Up" if uses_browser else "POST signup"
+                ):
+                    if result is None:
+                        try:
+                            result = client.submit(
+                                username, password, birthday + "T00:00:00.000Z"
+                            )
+                        except CaptchaDetected as exc:
+                            result = await recover_captcha(exc)
+                account = dict(
+                    username=username,
+                    password=password,
+                    email=None,
+                    emailPassword=None,
+                    cookies=result["cookies"],
+                )
+                exporter.update(
+                    **account,
+                    account_created=True,
+                    user_id=result["user_id"],
+                    stage="Signup confirmed",
+                    reason=None,
+                    bandwidth=client.bandwidth(),
+                )
+                with stage("Save account data"):
+                    await lib.saveAccount(account)
+                status, reason = "success", None
+                successes += 1
+            except CaptchaDetected as exc:
+                status, reason = "failed", str(exc)
+                failures += 1
+                logger.warning(
+                    "[%s] ACCOUNT FAILED | %s | remaining accounts follow the failed cooldown",
+                    client.account_label,
+                    reason,
+                )
+            except RateLimited as exc:
+                status, reason = "failed", str(exc)
+                raise
+            except (StopRequested, KeyboardInterrupt, asyncio.CancelledError) as exc:
+                status, reason = "interrupted", str(exc) or "Stopped by user"
+                if exporter.active and "CAPTCHA" in (
+                    exporter.active.get("reason") or ""
+                ):
+                    reason += "; CAPTCHA detected"
+                raise
+            except Exception as exc:
+                status, reason = "failed", str(exc)
+                failures += 1
+                logger.error("[%s] ACCOUNT FAILED | %s", client.account_label, reason)
             finally:
-                try:
-                    if chrome:
-                        closeBrowser(chrome, page)
-                finally:
-                    if extension_path:
-                        shutil.rmtree(extension_path, ignore_errors=True)
-                    if bar:
-                        bar.close()
-
-        if status == "failed":
-            print(f"\nAccount {x + 1} failed: {failReason}\n")
-            failures.append(f"[{x + 1}] {failReason}")
-            if username:
-                with open("./userfail.txt", "a", encoding="utf-8") as stream:
-                    stream.write(f"{username}:{password}\n")
-        await lib.saveTiming(username, status, time.perf_counter() - start_time, stages)
-
-    print(f"\n\nCreated {len(accounts)}/{total} accounts")
-    for failure in failures:
-        print(f"Failed {failure}")
-    if accounts:
-        print("Credentials:")
-        for account in accounts:
-            print(f"  {account['username']}: {'*' * len(account['password'])}")
-        if ask("EXPORT_TO_CLIPBOARD", "\nExport to clipboard? [y/n]: ").lower() == "y":
-            values = [cookie["value"] for account in accounts for cookie in account["cookies"]
-                      if cookie["name"] == ".ROBLOSECURITY"]
-            pyperclip.copy("".join(value + "\n" for value in values))
-            print("Copied to clipboard!")
+                with defer_stop_signals():
+                    if progress:
+                        progress.stage(
+                            "Close browser / export"
+                            if uses_browser
+                            else "Export results"
+                        )
+                    if uses_browser:
+                        if (
+                            exporter.active
+                            and exporter.active["username"]
+                            and not exporter.active["account_created"]
+                        ):
+                            recovered = client.confirmed_result()
+                            if recovered:
+                                exporter.update(
+                                    cookies=recovered["cookies"],
+                                    account_created=True,
+                                    user_id=recovered["user_id"],
+                                )
+                                logger.info(
+                                    "[%s] LOGIN COOKIE SAVED | captured before browser cleanup",
+                                    client.account_label,
+                                )
+                        try:
+                            client.finish_round()
+                        except Exception as exc:
+                            logger.warning(
+                                "[%s] Browser cleanup failed (%s); saving available results",
+                                client.account_label,
+                                type(exc).__name__,
+                            )
+                    logger.info(
+                        "[%s] EXPORT START | saving result and bandwidth",
+                        client.account_label,
+                    )
+                    metrics = client.bandwidth()
+                    metrics["mode"] = mode
+                    metrics["transport"] = "browser" if uses_browser else "http"
+                    metrics["headless"] = mode == "terminal" if uses_browser else None
+                    metrics["estimated_cost"] = (
+                        metrics["http_bytes_estimate"] / 1_000_000_000 * cost_per_gb
+                        if cost_per_gb
+                        else None
+                    )
+                    exporter.update(bandwidth=metrics)
+                    exporter.record_bandwidth(index + 1, status, metrics)
+                    exporter.finish(
+                        status,
+                        reason,
+                        seconds=time.perf_counter() - started,
+                        stages=stages[:],
+                    )
+                    if progress:
+                        progress.finish(status, metrics)
+                    logger.info("[%s] EXPORT DONE", client.account_label)
+                logger.info(
+                    "[%s] ACCOUNT END | status=%s | elapsed=%.2fs | request_body=%d B | "
+                    "received=%d B | decoded=%d B | 304=%d | reason=%s",
+                    client.account_label,
+                    status,
+                    time.perf_counter() - started,
+                    metrics["request_body_bytes"],
+                    metrics["response_encoded_bytes"],
+                    metrics["response_decoded_bytes"],
+                    metrics["not_modified"],
+                    reason or "none",
+                )
+                logger.info(
+                    "[%s] BANDWIDTH | mode=%s | requests=%d | total_estimate=%d B (%.4f MB) | estimated_cost=%s",
+                    client.account_label,
+                    mode,
+                    metrics["request_count"],
+                    metrics["http_bytes_estimate"],
+                    metrics["http_bytes_estimate"] / 1_000_000,
+                    metrics["estimated_cost"],
+                )
+            # The attempt is already exported and its browser closed. User stops
+            # during this wait must not create an extra interrupted account row.
+            if total == 0 or index + 1 < total:
+                bounds = done_delay if status == "success" else failed_delay
+                await sleep_between_rounds(
+                    bounds, status, index + 2, total, logger, progress, heartbeat
+                )
+    finally:
+        logger.info("CLEANUP START | closing %s client", mode)
+        try:
+            client.close()
+        except Exception as exc:
+            logger.warning("CLEANUP FAILED | %s client | %s", mode, type(exc).__name__)
+            raise
+        logger.info("CLEANUP DONE | %s client closed", mode)
+    logger.info("SUMMARY | created=%d/%s | failed=%d", successes, total or "∞", failures)
     return 1 if failures else 0
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Roblox auto signup tool")
+    parser = argparse.ArgumentParser(
+        description="Headless terminal, visible-browser or HTTP signup with exports and bandwidth logging"
+    )
+    parser.add_argument("count", nargs="?", type=int, default=None,
+                        help="Number of attempts; 0 = unlimited (default: ACCOUNT_COUNT or 0)")
     parser.add_argument(
-        "count",
-        nargs="?",
-        type=int,
+        "--mode",
+        choices=("terminal", "browser", "http"),
+        default="browser",
+        help="browser: visible browser (default); terminal: headless browser; http: Requests only",
+    )
+    parser.add_argument(
+        "--browser-path",
         default=None,
-        help="Number of accounts to generate (optional)",
+        help="Chromium executable (terminal/browser modes); overrides BROWSER_PATH",
     )
     parser.add_argument(
-        "--headless",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Run Chromium without a visible window (default: --no-headless)",
+        "--no-progress",
+        action="store_true",
+        help="Disable live terminal loading bars; keep plain logs",
     )
     parser.add_argument(
-        "--export-mode", choices=("dated", "append"), default="dated",
-        help="dated: a separate run folder; append: keep adding to output/*.txt",
+        "--quiet",
+        action="store_true",
+        help="Hide detailed console logs; keep progress, warnings/errors and full process.log (default: show logs)",
     )
+    parser.add_argument(
+        "--export-mode",
+        choices=("dated", "append"),
+        default="dated",
+        help="dated: accumulate in output/YYYY-MM-DD (Bangkok); append: accumulate directly in output",
+    )
+    parser.add_argument(
+        "--cost-per-gb",
+        type=float,
+        default=0,
+        help="Optional price per decimal GB, in your billing currency (HTTP estimate only)",
+    )
+    for name, default, help_text in (
+        ("connect-timeout", 10, "Connection timeout, seconds"),
+        ("read-timeout", 30, "Read inactivity timeout, seconds"),
+        (
+            "request-timeout",
+            60,
+            "Deadline for each HTTP request or browser operation, seconds",
+        ),
+        ("heartbeat", 5, "Print waiting status every N seconds"),
+    ):
+        parser.add_argument(f"--{name}", type=float, default=default, help=help_text)
     args = parser.parse_args(argv)
-
-    if args.count is not None and args.count <= 0:
-        parser.error("Account count must be a positive number.")
+    if args.count is not None and args.count < 0:
+        parser.error("Account count must be nonnegative (0 = unlimited)")
+    if not math.isfinite(args.cost_per_gb) or args.cost_per_gb < 0:
+        parser.error("--cost-per-gb must be finite and nonnegative")
+    for name in ("connect_timeout", "read_timeout", "request_timeout", "heartbeat"):
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be finite and positive")
     return args
 
 
@@ -698,15 +658,26 @@ if __name__ == "__main__":
     args = parse_args()
     try:
         with stop_signals():
-            exit_code = asyncio.run(main(args.count, headless=args.headless,
-                                         export_mode=args.export_mode))
-        sys.exit(exit_code)
+            code = asyncio.run(
+                main(
+                    args.count,
+                    export_mode=args.export_mode,
+                    cost_per_gb=args.cost_per_gb,
+                    connect_timeout=args.connect_timeout,
+                    read_timeout=args.read_timeout,
+                    request_timeout=args.request_timeout,
+                    heartbeat=args.heartbeat,
+                    mode=args.mode,
+                    browser_path=args.browser_path,
+                    no_progress=args.no_progress,
+                    quiet=args.quiet,
+                )
+            )
+        sys.exit(code)
     except StopRequested as exc:
         sys.exit(128 + exc.signum)
     except KeyboardInterrupt:
-        print("\n\nInterrupted. Cleaning up...")
-        gc.collect()
         sys.exit(130)
-    except Exception as e:
-        print(f"\nError: {e}")
+    except Exception as exc:
+        print(f"Error: {exc}")
         sys.exit(1)

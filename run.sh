@@ -12,9 +12,5 @@ else
     python_bin=python3
 fi
 
-# No arguments means exactly one attempt, regardless of ACCOUNT_COUNT in .env.
-if [ "$#" -eq 0 ]; then
-    set -- 1
-fi
-
+# Leave omitted count to ACCOUNT_COUNT in .env (default: 0 = unlimited).
 exec "$python_bin" main.py "$@"

@@ -1,4 +1,4 @@
-"""Incremental, per-run exports that do not depend on a clean shutdown."""
+"""Incremental daily or flat append exports with per-run checkpoints."""
 
 import csv
 from datetime import datetime, timezone
@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import uuid
+from zoneinfo import ZoneInfo
 from lib.shutdown import defer_stop_signals
 
 try:
@@ -36,21 +37,20 @@ class RunExport:
         if mode not in {"dated", "append"}:
             raise ValueError("Export mode must be dated or append")
         self.mode = mode
+        started = datetime.now(timezone.utc)
+        self.day = started.astimezone(ZoneInfo("Asia/Bangkok")).date().isoformat()
         self.directory = Path(root).resolve()
         if mode == "dated":
-            name = datetime.now().strftime("%Y-%m-%d-%H%M%S-%f") + "-" + uuid.uuid4().hex[:6]
-            self.directory /= name
-        self.directory.mkdir(parents=True, mode=0o700, exist_ok=mode == "append")
+            self.directory /= self.day
+        self.directory.mkdir(parents=True, mode=0o700, exist_ok=True)
         self._written = set()
-        self._format_paths = {}
         if mode == "dated":
-            (self.directory / "generate").mkdir()
-            (self.directory / "format").mkdir()
-        else:
-            for name in ("cookies.txt", "userfail.txt", "userpass.txt"):
-                with (self.directory / name).open("ab"):
-                    pass
-        self.data = dict(started_at=datetime.now(timezone.utc).isoformat(),
+            (self.directory / "generate").mkdir(exist_ok=True)
+            (self.directory / "format").mkdir(exist_ok=True)
+        for name in ("cookies.txt", "userfail.txt", "userpass.txt"):
+            with (self.directory / name).open("ab"):
+                pass
+        self.data = dict(run_id=uuid.uuid4().hex, started_at=started.isoformat(),
                          status="running", reason=None, requested_count=None, results=[])
         self.active = None
         self.save()
@@ -89,10 +89,67 @@ class RunExport:
         if self.mode == "append":
             self._save_append(rows)
             return
+        # Lock the complete read/merge/write operation, not only the replacement.
+        # Other processes may have updated this day's snapshot since our last save.
+        with defer_stop_signals(), (self.directory / ".export.lock").open("a+b") as lock:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            daily = self._merge_daily()
+            self._save_daily_snapshot(daily)
+
+    def _merge_daily(self):
+        path = self.directory / "results.json"
+        runs, previous_rows = [], []
+        if path.exists():
+            try:
+                previous = json.loads(path.read_text(encoding="utf-8"))
+                previous_rows = previous["results"]
+                runs = previous.get("runs", [{key: value for key, value in previous.items()
+                                              if key != "results"}])
+                if not isinstance(previous_rows, list) or not isinstance(runs, list):
+                    raise ValueError("Invalid snapshot structure")
+                ids = [run["run_id"] for run in runs]
+                if len(set(ids)) != len(ids) or not all(isinstance(value, str) for value in ids):
+                    raise ValueError("Invalid run IDs")
+                required = {"index", "status", "username", "password", "email", "emailPassword",
+                            "account_created", "seconds", "stage", "stages", "reason", "cookies"}
+                for row in previous_rows:
+                    if not isinstance(row, dict) or not required.issubset(row):
+                        raise ValueError("Invalid result row")
+                    row.setdefault("run_id", previous["run_id"])
+                    if row["run_id"] not in ids or not isinstance(row["cookies"], list):
+                        raise ValueError("Invalid result owner/cookies")
+                    if any(not isinstance(cookie, dict) or not {"name", "value"}.issubset(cookie)
+                           for cookie in row["cookies"]):
+                        raise ValueError("Invalid cookie record")
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise ValueError("Cannot merge existing daily results.json; existing data was not replaced") from exc
+        run_id = self.data["run_id"]
+        metadata = {key: value for key, value in self.data.items() if key != "results"}
+        existing_ids = [run["run_id"] for run in runs]
+        if run_id in existing_ids:
+            runs[existing_ids.index(run_id)] = metadata
+        else:
+            runs.append(metadata)
+        by_run = {run["run_id"]: [] for run in runs}
+        for row in previous_rows:
+            by_run[row["run_id"]].append(row)
+        by_run[run_id] = [dict(row, run_id=run_id) for row in self.data["results"]]
+        rows = [row for run in runs for row in by_run[run["run_id"]]]
+        return dict(self.data, schema_version=2, date=self.day, timezone="Asia/Bangkok",
+                    runs=runs, results=rows, last_updated_run_id=run_id,
+                    requested_count=(0 if any(run.get("requested_count") == 0 for run in runs)
+                                     else sum(run.get("requested_count") or 0 for run in runs)),
+                    counts={status: sum(row["status"] == status for row in rows)
+                            for status in ("success", "failed", "interrupted", "in_progress")})
+
+    def _save_daily_snapshot(self, daily):
+        rows = daily["results"]
         # Canonical snapshot is replaced first; derived formats may lag after SIGKILL.
-        atomic_write(self.directory / "results.json", json.dumps(self.data, indent=2))
+        atomic_write(self.directory / "results.json", json.dumps(daily, indent=2))
+        self._save_append(self.data["results"])
         buffer = io.StringIO(newline="")
-        fields = ["index", "status", "username", "password", "email", "account_created",
+        fields = ["run_id", "index", "status", "username", "password", "email", "account_created",
                   "seconds", "stage", "reason"]
         writer = csv.DictWriter(buffer, fields, extrasaction="ignore")
         writer.writeheader()
@@ -104,7 +161,6 @@ class RunExport:
             atomic_write(self.directory / f"{status}.txt", text)
         cookies = [cookie["value"] for row in rows for cookie in row["cookies"]
                    if cookie["name"] == ".ROBLOSECURITY"]
-        atomic_write(self.directory / "cookies.txt", "".join(value + "\n" for value in cookies))
         self._save_legacy_layout(rows, cookies)
 
     def _append_once(self, key, filename, value):
@@ -140,6 +196,11 @@ class RunExport:
                     self._append_once((row["index"], "cookie", cookie["value"]),
                                       "cookies.txt", cookie["value"])
 
+    def record_bandwidth(self, index, status, metrics):
+        record = dict(run_id=self.data["run_id"], round=index, status=status,
+                      timestamp=datetime.now(timezone.utc).isoformat(), **metrics)
+        self._append_once((index, "bandwidth"), "bandwidth.jsonl", json.dumps(record))
+
     def _save_legacy_layout(self, rows, cookies):
         created = [row for row in rows if row["account_created"] or row["status"] == "success"]
         failed = [row for row in rows if row["status"] in {"failed", "interrupted"}
@@ -165,7 +226,7 @@ class RunExport:
         ):
             path = self.directory / "format" / f"{name}_{len(values)}.txt"
             atomic_write(path, "".join(value + "\n" for value in values))
-            previous = self._format_paths.get(name)
-            self._format_paths[name] = path
-            if previous and previous != path:
-                previous.unlink(missing_ok=True)
+            # Counts now cover the entire day, including runs from other processes.
+            for previous in path.parent.glob(f"{name}_*.txt"):
+                if previous != path and previous.stem[len(name) + 1:].isdigit():
+                    previous.unlink(missing_ok=True)

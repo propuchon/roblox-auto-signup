@@ -30,7 +30,7 @@ def parse_proxy(value, default_auth=None):
                 raise ValueError("Username and password must both be supplied")
             auth = (unquote(parts.username), unquote(parts.password))
         if auth and parts.scheme.startswith("socks"):
-            raise ValueError("Use HTTP/HTTPS for authenticated browser proxies")
+            raise ValueError("Use HTTP/HTTPS for authenticated proxies")
         host = parts.hostname
         if ":" in host:
             host = f"[{host}]"

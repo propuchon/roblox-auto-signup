@@ -2,6 +2,15 @@ import os
 from pathlib import Path
 
 SECRET_KEYS = {"PASSWORD", "PROXIES", "PROXY_USERNAME", "PROXY_PASSWORD"}
+ENV_FILE_VALUES = {}
+
+
+def value_source(key):
+    if key not in os.environ:
+        return "default"
+    if key in ENV_FILE_VALUES and os.environ[key] == ENV_FILE_VALUES[key]:
+        return ".env"
+    return "environment"
 
 
 def loadEnv(path=None):
@@ -16,7 +25,10 @@ def loadEnv(path=None):
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+            key, value = key.strip(), value.strip().strip("\"'")
+            if key not in os.environ:
+                os.environ[key] = value
+                ENV_FILE_VALUES[key] = value
 
 
 def ask(key, prompt):
