@@ -23,4 +23,5 @@ config.txt.bak
 output/
 timings.csv
 .env
+proxies.txt
 userfail.txt

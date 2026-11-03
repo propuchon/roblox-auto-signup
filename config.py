@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-SECRET_KEYS = {"PASSWORD"}
+SECRET_KEYS = {"PASSWORD", "PROXIES", "PROXY_USERNAME", "PROXY_PASSWORD"}
 
 
 def loadEnv(path=None):
@@ -25,7 +25,7 @@ def ask(key, prompt):
     value = os.environ.pop(key, None)
     if value is None:
         return input(prompt)
-    print(f"\n{key}={'*' * len(value) if key in SECRET_KEYS and value else value} (from .env)")
+    print(f"\n{key}={'[hidden]' if key in SECRET_KEYS and value else value} (from .env)")
     return value
 
 

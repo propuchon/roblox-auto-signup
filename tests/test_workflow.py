@@ -32,7 +32,7 @@ class Bar:
 
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
-    async def run_workflow(self, mode):
+    async def run_workflow(self, mode, cli_account_count=None, configured_count="1"):
         events, browsers, elapsed = [], [], [0]
 
         class Library(Main):
@@ -48,7 +48,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             async def saveTiming(self, username, status, seconds, stages):
                 events.append(status)
 
-        element = NS(click=lambda: None, input=lambda *a: None,
+        element = NS(click=lambda: None, input=lambda *a, **k: None, clear=lambda: None,
                      select=NS(by_value=lambda *a: None), states=NS(is_displayed=True))
 
         class Page:
@@ -66,19 +66,27 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             def url(self):
                 success = self.submitted_at is not None and mode != "manual_timeout"
                 if mode == "manual":
-                    success = success and elapsed[0] - self.submitted_at >= 20
+                    success = success and elapsed[0] - self.submitted_at >= 60
                 return "https://www.roblox.com/home" if success else "https://www.roblox.com/CreateAccount"
 
             def ele(self, selector, *args, **kwargs):
                 if "signup-button" in selector:
-                    return NS(click=lambda: setattr(self, "submitted_at", elapsed[0]))
-                if "korea-compliance" in selector:
+                    def submit():
+                        events.append("submit")
+                        self.submitted_at = elapsed[0]
+                    return NS(click=submit)
+                if "captcha" in selector:
+                    return NS(click=lambda: events.append("captcha_closed"))
+                if "compliance" in selector or "captcha" in selector:
                     return False
                 if selector.startswith("xpath:"):
                     return False
                 return element
 
             def get_frames(self, **kwargs):
+                return []
+
+            def eles(self, *args, **kwargs):
                 return []
 
             def cookies(self):
@@ -102,7 +110,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         answers = dict(PASSWORD="", BROWSER_PATH="", EMAIL_VERIFICATION="n", NAME_PREFIX="",
                        SCRAMBLED_USERNAME="y", CUSTOMIZATION="n", FOLLOW_USERS="", PROXIES="",
-                       INCOGNITO="n", ACCOUNT_COUNT="1", EXPORT_TO_CLIPBOARD="n")
+                       INCOGNITO="n", ACCOUNT_COUNT=configured_count, EXPORT_TO_CLIPBOARD="n")
         with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory), \
                 patch.multiple(main, Main=Library, ChromiumOptions=Options, Chromium=browser,
                                tqdm=lambda **k: Bar(), ask=lambda key, prompt: answers[key]), \
@@ -111,7 +119,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.asyncio, "sleep", sleep), \
                 patch.object(main.time, "monotonic", lambda: elapsed[0]), \
                 contextlib.redirect_stdout(io.StringIO()):
-            await main.main()
+            exit_code = await main.main(cli_account_count)
+        self.assertEqual(exit_code, 1 if mode == "manual_timeout" else 0)
         return events, browsers, elapsed[0]
 
     async def test_plain_invocation_saves_before_cleanup(self):
@@ -131,10 +140,18 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(browsers), 1)
         self.assertIn("success", events)
         self.assertLess(elapsed, 180)
+        self.assertEqual(events.count("submit"), 1)
+        self.assertNotIn("captcha_closed", events)
 
-    async def test_unfinished_signup_fails_after_180_seconds_and_closes(self):
+    async def test_cli_one_overrides_configured_count(self):
+        events, browsers, _ = await self.run_workflow("normal", cli_account_count=1,
+                                                     configured_count="5")
+        self.assertEqual(len(browsers), 1)
+        self.assertEqual(events.count("submit"), 1)
+
+    async def test_unfinished_signup_fails_after_timeout_and_closes(self):
         events, browsers, elapsed = await self.run_workflow("manual_timeout")
-        self.assertEqual(elapsed - browsers[0].submitted_at - 5, 180)
+        self.assertAlmostEqual(elapsed - browsers[0].submitted_at, main.SIGNUP_TIMEOUT)
         self.assertIn("failed", events)
         self.assertIn("quit", events)
         self.assertNotIn("save", events)

@@ -9,6 +9,8 @@ import re
 import asyncio
 import json
 import tempfile
+from urllib.parse import quote
+from lib.proxies import parse_proxy
 from DrissionPage import errors
 from datetime import datetime
 from pymailtm import MailTm, Account
@@ -329,20 +331,17 @@ class Main():
             return False, "Empty proxy provided"
 
         try:
+            if isinstance(auth, str):
+                auth = tuple(auth.split(":", 1))
+            parsed = parse_proxy(proxy, auth)
+        except ValueError as exc:
+            return False, str(exc)
+        proxy, auth = parsed.server, parsed.auth
 
-            proxy = proxy.strip()
-
-            if not proxy.startswith(('http://', 'https://', 'socks4://', 'socks5://')):
-                if re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', proxy):
-                    proxy = "http://" + proxy
-                else:
-                    return False, f"Invalid proxy format: {proxy}. Expected format: protocol://host:port or IP:PORT"
-
-            if any(char in proxy for char in ['&', '|', ';', '$', '`', '(', ')', '<', '>']):
-                return False, f"Proxy contains invalid characters: {proxy}"
-
-            # Credentials only go into the request, never into the messages below
-            url = proxy.replace("://", f"://{auth}@", 1) if auth else proxy
+        try:
+            # Encode credentials for Requests; Chromium receives only the endpoint.
+            encoded_auth = ":".join(quote(part, safe="") for part in auth) if auth else None
+            url = proxy.replace("://", f"://{encoded_auth}@", 1) if encoded_auth else proxy
             response = requests.get("http://www.google.com", proxies={"http": url, "https": url}, timeout=10)
             if response.status_code == 200:
                 return True, f"Proxy {proxy} is working"
@@ -353,7 +352,7 @@ class Main():
         except requests.exceptions.ConnectionError:
             return False, f"Proxy {proxy} connection failed"
         except Exception as e:
-            return False, f"Proxy {proxy} test failed: {str(e)}"
+            return False, f"Proxy {proxy} test failed ({type(e).__name__})"
 
     async def generateEmail(self, password="Qing762.chy"):
         if not hasattr(self, 'mailtm'):
