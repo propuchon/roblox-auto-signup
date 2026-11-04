@@ -9,7 +9,6 @@ from itertools import count as iteration_count
 import os
 from pathlib import Path
 import random
-import re
 import secrets
 import sys
 import time
@@ -23,6 +22,7 @@ from lib.http_signup import (
     SignupClient,
 )
 from lib.lib import Main
+from lib.username_rules import validate_prefix
 from lib.proxies import parse_proxy, split_proxy_list
 from lib.run_export import RunExport
 from lib.shutdown import StopRequested, defer_stop_signals, stop_signals
@@ -56,8 +56,8 @@ def gather_config(cli_account_count=None):
     if count < 0:
         raise ValueError("ACCOUNT_COUNT must be nonnegative (0 = unlimited)")
     prefix = os.environ.get("NAME_PREFIX", "").strip()
-    if prefix and not re.fullmatch(r"[A-Za-z0-9_]+", prefix):
-        raise ValueError("NAME_PREFIX must contain only letters, digits or underscores")
+    if prefix:
+        validate_prefix(prefix)
     birthday = os.environ.get("BIRTHDAY", "").strip()
     if birthday:
         birthday = date.fromisoformat(birthday).isoformat()

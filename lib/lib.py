@@ -7,11 +7,33 @@ import json
 import tempfile
 from pathlib import Path
 from datetime import datetime
+from string import ascii_letters
+from lib.username_rules import validate_prefix, validate_username
 
 
 def getResourcePath(relative_path):
     base_path = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)
     return str(Path(base_path) / relative_path)
+
+
+def mix_username_digits(name, count=None, max_length=20):
+    """Add 0–3 digits and optionally one internal underscore; validate syntax."""
+    count = random.randrange(4) if count is None else count
+    if not isinstance(count, int) or not 0 <= count <= 3:
+        raise ValueError("Generated digit count must be 0-3")
+    if not 3 <= max_length <= 20:
+        raise ValueError("Username length limit must be 3-20")
+    add_underscore = ("_" not in name and min(len(name), max_length - count - 1) >= 2
+                      and random.choice((False, True)))
+    characters = list(name[:max_length - count - int(add_underscore)])
+    if not characters:
+        raise ValueError("Username needs a nonempty base")
+    for _ in range(count):
+        position = random.randrange(1, len(characters) + 1)
+        characters.insert(position, str(random.randrange(10)))
+    if add_underscore:
+        characters.insert(random.randrange(1, len(characters)), "_")
+    return validate_username("".join(characters))
 
 
 class UsernameGenerator:
@@ -28,8 +50,10 @@ class UsernameGenerator:
         self.set_length(min_length, max_length)
 
     def set_length(self, min_length, max_length):
-        if not max_length:
+        if max_length is None:
             max_length = min_length
+        if not 3 <= min_length <= max_length <= 20:
+            raise ValueError("Username lengths must satisfy 3 <= min <= max <= 20")
 
         self.min_length = min_length
         self.max_length = max_length
@@ -44,10 +68,9 @@ class UsernameGenerator:
 
         length = random.randrange(self.min_length, self.max_length + 1)
 
-        if random.randrange(5) == 0:
-            num_length = random.randrange(3) + 1
-            if length - num_length < 2:
-                num_length = 0
+        num_length = random.randrange(4)
+        if length - num_length < 2:
+            num_length = 0
 
         letterLength = max(1, length - num_length)
         for j in range(letterLength):
@@ -68,11 +91,7 @@ class UsernameGenerator:
                 is_double = False
         if random.randrange(2) == 0:
             username = username[:1].upper() + username[1:]
-        if num_length > 0:
-            for j in range(num_length):
-                username += str(random.randrange(10))
-
-        return username
+        return mix_username_digits(username, num_length, max_length=length)
 
     def _get_consonant(self, is_double):
         if is_double:
@@ -108,8 +127,12 @@ class UsernameGenerator:
 class Main:
     def usernameCreator(self, nameFormat=None, scrambled=True):
         if nameFormat:
-            return nameFormat[:12] + "_" + str(secrets.randbelow(1000000)).zfill(6)
-        return self.generateUsername(scrambled=scrambled)
+            prefix = validate_prefix(nameFormat)[:12]
+            separator = "" if "_" in prefix else "_"
+            username = prefix + separator + str(secrets.randbelow(1000000)).zfill(6)
+        else:
+            username = self.generateUsername(scrambled=scrambled)
+        return validate_username(username)
 
     def generateUsername(self, scrambled=None):
         if scrambled is False:
@@ -127,9 +150,10 @@ class Main:
                 verb = random.choice(verbs).strip()
                 noun = random.choice(nouns).strip()
                 adjective = random.choice(adjectives).strip()
-                number = random.randint(10, 99)
-                username = (verb + noun + adjective)[:18] + str(number)
-                return username
+                name = "".join(char for char in verb + noun + adjective if char in ascii_letters)
+                if len(name) < 3:
+                    raise ValueError("Selected words do not contain enough username letters")
+                return mix_username_digits(name)
             except FileNotFoundError as e:
                 print(f"Warning: Required text files not found: {e}. Falling back to scrambled username.")
                 gen = UsernameGenerator(10, 15)
